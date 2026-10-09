@@ -120,7 +120,12 @@ def stabilizer():
 def stabilizer_steps():
     rows = read("stabilizer_steps.csv")
     fig, ax = plt.subplots(figsize=(8, 3.6))
-    labels = [r["description"] + (f" ({r['shots']} shots)" if r["shots"] != "10000" else "") for r in rows]
+    labels = [
+        r["description"]
+        + (f" ({r['shots']} shots)" if r["shots"] != "10000" else "")
+        + (" (under load)" if r["conditions"] != "quiet" else "")
+        for r in rows
+    ]
     values = [float(r["seconds"]) for r in rows]
     bars = ax.barh(range(len(rows)), values, color=COLORS["qvd"])
     ax.bar_label(bars, labels=[f"{v:g} s" for v in values], padding=3, fontsize=9)

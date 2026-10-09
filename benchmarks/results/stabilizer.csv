@@ -4,16 +4,16 @@ distance,qubits,rounds,gates,measurements,shots,simulator,method,version,threads
 11,241,11,6160,1441,10000,stim,reference_sample + FlipSimulator,1.16.0,1,0.004
 11,241,11,6160,1441,10000,stim,compile_sampler().sample,1.16.0,1,0.108
 11,241,11,6160,1441,10000,qiskit-aer,stabilizer,0.17.2,all,10.812
-21,881,21,44520,9681,10000,qvd,stabilizer::sample,0.1.0,8,0.009
+21,881,21,44520,9681,10000,qvd,stabilizer::sample,0.1.0,8,0.010
 21,881,21,44520,9681,10000,qvd,stabilizer::sample,0.1.0,1,0.018
 21,881,21,44520,9681,10000,stim,reference_sample + FlipSimulator,1.16.0,1,0.036
 21,881,21,44520,9681,10000,stim,compile_sampler().sample,1.16.0,1,0.315
 21,881,21,44520,9681,10000,qiskit-aer,stabilizer,0.17.2,all,635.609
-51,5201,51,652800,135201,10000,qvd,stabilizer::sample,0.1.0,8,0.151
+51,5201,51,652800,135201,10000,qvd,stabilizer::sample,0.1.0,8,0.141
 51,5201,51,652800,135201,10000,qvd,stabilizer::sample,0.1.0,1,0.290
 51,5201,51,652800,135201,10000,stim,reference_sample + FlipSimulator,1.16.0,1,0.452
 51,5201,51,652800,135201,10000,stim,compile_sampler().sample,1.16.0,1,6.920
-101,20401,101,5110600,1040401,10000,qvd,stabilizer::sample,0.1.0,8,2.766
+101,20401,101,5110600,1040401,10000,qvd,stabilizer::sample,0.1.0,8,1.524
 101,20401,101,5110600,1040401,10000,qvd,stabilizer::sample,0.1.0,1,4.408
 101,20401,101,5110600,1040401,10000,stim,reference_sample + FlipSimulator,1.16.0,1,12.360
 101,20401,101,5110600,1040401,10000,stim,compile_sampler().sample,1.16.0,1,130.657

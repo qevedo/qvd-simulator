@@ -37,6 +37,22 @@ pub enum Clifford {
     Swap(usize, usize),
 }
 
+impl Clifford {
+    /// The qubits the gate acts on (one or two).
+    pub fn qubits(self) -> impl Iterator<Item = usize> {
+        let (qubits, len) = match self {
+            Clifford::H(q)
+            | Clifford::S(q)
+            | Clifford::Sdg(q)
+            | Clifford::X(q)
+            | Clifford::Y(q)
+            | Clifford::Z(q) => ([q, q], 1),
+            Clifford::CX(a, b) | Clifford::CZ(a, b) | Clifford::Swap(a, b) => ([a, b], 2),
+        };
+        qubits.into_iter().take(len)
+    }
+}
+
 /// `angle / (π/2)` if it is (within 1e-9) an integer, reduced mod 4.
 fn quarter_turns(angle: f64) -> Option<u8> {
     let turns = angle / FRAC_PI_2;
@@ -144,39 +160,35 @@ pub fn is_clifford(circuit: &Circuit) -> bool {
 
 impl Tableau {
     pub fn apply(&mut self, op: Clifford) {
-        match op {
-            Clifford::H(q) => self.h(q),
-            Clifford::S(q) => self.s(q),
-            Clifford::Sdg(q) => self.sdg(q),
-            Clifford::X(q) => self.x(q),
-            Clifford::Y(q) => self.y(q),
-            Clifford::Z(q) => self.z(q),
-            Clifford::CX(c, t) => self.cx(c, t),
-            Clifford::CZ(a, b) => self.cz(a, b),
-            Clifford::Swap(a, b) => self.swap(a, b),
-        }
+        self.apply_layer(&[op]);
     }
 
     /// The tableau after running the gates of a circuit (measurements and
     /// resets are applied too, with outcomes drawn from `rng`).
     pub fn from_circuit(circuit: &Circuit, rng: &mut impl Rng) -> Result<Tableau, String> {
         let mut tableau = Tableau::new(circuit.num_qubits);
+        let mut layer = Layer::new(circuit.num_qubits);
         for instruction in &circuit.instructions {
             match instruction {
                 Instruction::Gate { gate, qubits } => {
                     for op in lower(gate, qubits)
                         .ok_or_else(|| format!("{gate:?} is not a Clifford gate"))?
                     {
-                        tableau.apply(op);
+                        layer.push(op, &mut tableau);
                     }
                 }
                 Instruction::Measure { qubit, .. } => {
+                    layer.flush(&mut tableau);
                     tableau.measure(*qubit, rng);
                 }
-                Instruction::Reset { qubit } => tableau.reset(*qubit, rng),
+                Instruction::Reset { qubit } => {
+                    layer.flush(&mut tableau);
+                    tableau.reset(*qubit, rng);
+                }
                 Instruction::Barrier { .. } => {}
             }
         }
+        layer.flush(&mut tableau);
         Ok(tableau)
     }
 }
@@ -322,6 +334,45 @@ impl Samples {
     }
 }
 
+/// Gates waiting to be applied as one layer: consecutive gates on pairwise
+/// disjoint qubits, which commute.
+struct Layer {
+    ops: Vec<Clifford>,
+    /// `stamp[q] == current` iff qubit `q` is used by a gate in `ops`.
+    stamp: Vec<u32>,
+    current: u32,
+}
+
+impl Layer {
+    fn new(qubits: usize) -> Layer {
+        Layer {
+            ops: Vec::new(),
+            stamp: vec![0; qubits],
+            current: 1,
+        }
+    }
+
+    /// Add a gate, first applying the layer if the gate shares a qubit
+    /// with it.
+    fn push(&mut self, op: Clifford, tableau: &mut Tableau) {
+        if op.qubits().any(|q| self.stamp[q] == self.current) {
+            self.flush(tableau);
+        }
+        for q in op.qubits() {
+            self.stamp[q] = self.current;
+        }
+        self.ops.push(op);
+    }
+
+    fn flush(&mut self, tableau: &mut Tableau) {
+        if !self.ops.is_empty() {
+            tableau.apply_layer(&self.ops);
+            self.ops.clear();
+            self.current += 1;
+        }
+    }
+}
+
 /// A circuit step with the reference outcome of measurements filled in.
 #[derive(Clone, Copy)]
 enum Step {
@@ -362,8 +413,9 @@ pub fn sample(circuit: &Circuit, shots: usize, seed: Option<u64>) -> Result<Samp
         None => Pcg64::from_rng(&mut rand::rng()),
     };
     let n = circuit.num_qubits;
-    // Reference shot.
+    // Reference shot, with gates on disjoint qubits applied in parallel.
     let mut tableau = Tableau::new(n);
+    let mut layer = Layer::new(n);
     let mut steps = Vec::with_capacity(circuit.instructions.len());
     for instruction in &circuit.instructions {
         match instruction {
@@ -371,11 +423,12 @@ pub fn sample(circuit: &Circuit, shots: usize, seed: Option<u64>) -> Result<Samp
                 for op in
                     lower(gate, qubits).ok_or_else(|| format!("{gate:?} is not a Clifford gate"))?
                 {
-                    tableau.apply(op);
+                    layer.push(op, &mut tableau);
                     steps.push(Step::Gate(op));
                 }
             }
             Instruction::Measure { qubit, clbit } => {
+                layer.flush(&mut tableau);
                 let reference = tableau.measure(*qubit, &mut rng);
                 steps.push(Step::Measure {
                     qubit: *qubit,
@@ -384,13 +437,14 @@ pub fn sample(circuit: &Circuit, shots: usize, seed: Option<u64>) -> Result<Samp
                 });
             }
             Instruction::Reset { qubit } => {
+                layer.flush(&mut tableau);
                 tableau.reset(*qubit, &mut rng);
                 steps.push(Step::Reset { qubit: *qubit });
             }
             Instruction::Barrier { .. } => {}
         }
     }
-    drop(tableau);
+    drop((tableau, layer));
     // Frames, one block per thread, at most 2048 shots each so a block's
     // frames stay in cache. Run inside a pool of performance cores: the
     // blocks synchronise after every segment of steps, so a slow core holds

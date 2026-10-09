@@ -393,7 +393,8 @@ fn surface_code_stabilizers_repeat() {
 
 #[test]
 fn sampling_is_reproducible_across_thread_counts() {
-    let circuit = qvd::library::surface_code(5, 3);
+    // Large enough that gate layers run in parallel.
+    let circuit = qvd::library::surface_code(15, 3);
     let sample = |threads| {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads)

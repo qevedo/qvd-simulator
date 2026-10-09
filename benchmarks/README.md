@@ -52,13 +52,17 @@ timed two ways:
   arrays and is much slower at these sizes.
 
 Qiskit Aer's stabilizer method was not run past d = 21 (it took 636 s
-there). A virtual machine used about six cores during these runs, for every
-simulator alike, so absolute times are a little high.
+there). A virtual machine shared the machine: Stim, Aer and qvd on one
+thread ran while it used about six cores, and qvd on 8 P-cores was
+re-measured after the parallel reference shot while it used about 14. So
+absolute times are a little high, and pessimistic for qvd's 8-core column.
 
 ![Stabilizer optimisation steps](charts/stabilizer_steps.svg)
 
 The steps that took the distance-101 code (20,401 qubits, 101 rounds) from
-37 s to 2.4 s, measured on a quiet machine. [docs/DESIGN.md](../docs/DESIGN.md)
+37 s to 1.5 s. Steps 1–7 were measured on a quiet machine. Step 8 was
+measured under the heavier load; under that same load the build before it
+took 2.57 s. [docs/DESIGN.md](../docs/DESIGN.md)
 explains each one.
 
 ## Reproducing

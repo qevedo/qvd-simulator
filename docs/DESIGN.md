@@ -198,7 +198,8 @@ for every layout policy:
 | Gates in the column layout as sparse row updates; adaptive layout switching | 11.2 s |
 | Per-row bitmap of nonzero words: row products touch only those | 4.3 s |
 | Frames in parallel blocks on the P-cores | 3.5 s |
-| Generator emits the H layer, then the measurement layer | **2.4 s** |
+| Generator emits the H layer, then the measurement layer | 2.4 s |
+| Reference shot: gates on disjoint qubits in parallel | **1.5 s** (under load, see below) |
 
 The steps, in order:
 
@@ -230,6 +231,20 @@ The steps, in order:
   of P-cores is faster than all 32 threads (frames 1.0 s vs 3.8 s at
   d = 101). Each 64-shot word has its own random stream, which makes
   results depend only on the seed and not on the thread count.
+- **Parallel reference shot.** The reference pass was then most of the
+  time: about 2.2 s, all cache misses in the 208 MB tableau, on one core.
+  Consecutive gates on pairwise disjoint qubits commute and touch disjoint
+  rows, so the reference pass collects them into layers (a layer ends at a
+  gate that reuses a qubit, or at a measurement or reset) and applies each
+  layer in parallel. Each row's words and occupancy bits belong to one gate
+  of the layer; sign bits, 64 rows to a word, are flipped with atomic XORs.
+  The sequential and parallel paths share the same row code, and the
+  result is identical to applying the gates in order. The reference shot
+  at d = 101 drops to 0.75 s. This step was measured while a virtual
+  machine kept about 14 cores busy; under that same load, the previous
+  build took 2.57 s and this one 1.52 s (best of five, interleaved).
+  Checking runs of determined measurements in parallel as well made no
+  measurable difference, so the measurements stay sequential.
 
 **Against Stim and Qiskit Aer.** Same OpenQASM circuits (layered
 generator), 10,000 shots, timed by `benchmarks/compare_stim.py`. Stim 1.16
@@ -241,18 +256,19 @@ measurement-major output (the fair comparison), and
 | Distance | Qubits | Gates | Measurements | qvd, 8 P-cores (1 thread) | Stim 1.16, reference + `FlipSimulator` | Stim `sample()` | Qiskit Aer 0.17 stabilizer |
 |---|---|---|---|---|---|---|---|
 | 11 | 241 | 6,160 | 1,441 | **0.001 s** (0.003 s) | 0.004 s | 0.11 s | 10.8 s |
-| 21 | 881 | 44,520 | 9,681 | **0.009 s** (0.018 s) | 0.036 s | 0.32 s | 636 s |
-| 51 | 5,201 | 652,800 | 135,201 | **0.15 s** (0.29 s) | 0.45 s | 6.9 s | — |
-| 101 | 20,401 | 5,110,600 | 1,040,401 | **2.8 s** (4.4 s) | 12.4 s | 131 s | — |
+| 21 | 881 | 44,520 | 9,681 | **0.010 s** (0.018 s) | 0.036 s | 0.32 s | 636 s |
+| 51 | 5,201 | 652,800 | 135,201 | **0.14 s** (0.29 s) | 0.45 s | 6.9 s | — |
+| 101 | 20,401 | 5,110,600 | 1,040,401 | **1.5 s** (4.4 s) | 12.4 s | 131 s | — |
 
-These runs shared the machine with a virtual machine using about six cores
-(the step table above was measured on a quiet machine, hence 2.4 s there and
-2.8 s here); all simulators ran under the same conditions. At d = 51 Stim
-spends 0.17 s on its reference shot and the rest in frames; at d = 101 its
-reference shot alone takes 8.0 s, against about 2 s for qvd's sparse rows.
-`sample()`, which returns shot-major bits, is 9–27× slower than Stim's flip
-simulator here. Single-threaded, qvd is 1.3–2.8× faster
-than Stim; with 8 P-cores it is 3–4.5× faster.
+These runs shared the machine with a virtual machine. Stim, Aer and qvd on
+one thread ran while it used about six cores; qvd on 8 P-cores was
+re-measured after the parallel reference shot while it used about 14, which
+can only have slowed qvd down. (One thread takes the same sequential path as
+before.) At d = 51 Stim spends 0.17 s on its reference shot and the rest in
+frames; at d = 101 its reference shot alone takes 8.0 s, against 0.75 s
+for qvd's. `sample()`, which returns shot-major bits, is 9–27× slower than
+Stim's flip simulator here. Single-threaded, qvd is 1.3–2.8× faster than
+Stim; with 8 P-cores it is 3–8× faster.
 
 **Correctness** (`tests/stabilizer.rs`): expectation values of random Pauli
 strings and deterministic measurement outcomes against the dense simulator
@@ -261,7 +277,8 @@ dense projection under every layout policy, including frequent switching.
 Sampled distributions are checked against exact branching distributions
 (5σ). Further tests cover 1,000-qubit GHZ sampling, the surface code's
 stabilizers repeating from round to round (d = 3, 5, 7), reproducibility
-across thread counts, and 64×64 transposes.
+across thread counts, parallel gate layers against the same gates in order
+(from both layouts), and 64×64 transposes.
 
 ## 8. Not done yet
 
@@ -275,11 +292,10 @@ across thread counts, and 64×64 transposes.
   and selection between them beyond the Clifford check, are the roadmap in
   the README. With the stabilizer backend, they are what takes structured
   circuits past the 32-qubit wall.
-- **Stabilizer reference pass in parallel.** The reference shot is
-  sequential and is most of the time at d = 101 (about 2.2 s; its gates are
-  cache misses in a 208 MB tableau). Gates on disjoint qubits touch
-  disjoint rows and could run in parallel, and storing each row's x and z
-  words side by side would halve the misses.
+- **Fewer cache misses in the stabilizer reference shot.** Its gates are
+  cache misses in a 208 MB tableau at d = 101. Storing each row's x and z
+  words side by side would halve them. Random measurements (the first and
+  last rounds of a surface code) still collapse one at a time.
 - **Encoded or out-of-core states.** A 2-byte encoding would reach 34
   qubits here at some precision cost; SSD-backed states need a dedicated
   multi-terabyte NVMe array to be practical.

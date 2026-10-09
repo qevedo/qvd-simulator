@@ -11,7 +11,7 @@ below).
 
 Clifford circuits go to a stabilizer backend instead, which has no 2ⁿ
 memory wall: a distance-101 surface code (20,401 qubits, 5.1M gates, 1M
-measurements) samples 10,000 shots in 2.8 s, 4.5× faster than Stim and
+measurements) samples 10,000 shots in 1.5 s, 8× faster than Stim and
 2.8× faster on a single thread (details below).
 
 ## How it works
@@ -74,23 +74,24 @@ single-threaded. Details are in
 | Distance | Qubits | Gates | Measurements | qvd, 8 P-cores (1 thread) | Stim 1.16, reference + `FlipSimulator` | Stim `sample()` | Qiskit Aer 0.17 stabilizer |
 |---|---|---|---|---|---|---|---|
 | 11 | 241 | 6,160 | 1,441 | **0.001 s** (0.003 s) | 0.004 s | 0.11 s | 10.8 s |
-| 21 | 881 | 44,520 | 9,681 | **0.009 s** (0.018 s) | 0.036 s | 0.32 s | 636 s |
-| 51 | 5,201 | 652,800 | 135,201 | **0.15 s** (0.29 s) | 0.45 s | 6.9 s | — |
-| 101 | 20,401 | 5,110,600 | 1,040,401 | **2.8 s** (4.4 s) | 12.4 s | 131 s | — |
+| 21 | 881 | 44,520 | 9,681 | **0.010 s** (0.018 s) | 0.036 s | 0.32 s | 636 s |
+| 51 | 5,201 | 652,800 | 135,201 | **0.14 s** (0.29 s) | 0.45 s | 6.9 s | — |
+| 101 | 20,401 | 5,110,600 | 1,040,401 | **1.5 s** (4.4 s) | 12.4 s | 131 s | — |
 
-These runs shared the machine with a virtual machine using about six cores,
-so absolute times are a little high; all simulators ran under the same
-conditions. Stim's `sample()` returns shot-major arrays and is much slower
+These runs shared the machine with a virtual machine using 6–14 cores, so
+absolute times are a little high; the qvd 8-core column was measured under
+the heavier load ([details](benchmarks/README.md#clifford-circuits)). Stim's `sample()` returns shot-major arrays and is much slower
 here; its flip simulator returns measurement-major results, as qvd does,
 and is the fairer comparison.
 
 The stabilizer backend runs a Stim-style reference shot on an inverse
-tableau and propagates bit-packed Pauli frames for all other shots. Three
+tableau and propagates bit-packed Pauli frames for all other shots. Four
 additions matter at this scale:
 - the tableau switches between row and column layouts depending on whether
   gates or random measurements dominate;
 - rows keep a bitmap of their nonzero words, so products of the sparse rows
   of a local code touch a few words instead of 319;
+- gates on disjoint qubits run in parallel in the reference shot;
 - frames run in parallel, cache-sized blocks.
 
 ## How many qubits?

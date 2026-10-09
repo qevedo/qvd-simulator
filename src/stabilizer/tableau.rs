@@ -20,8 +20,12 @@
 //! Signs follow Aaronson & Gottesman's convention: a row is `(-1)^sign`
 //! times a product of `I, X, Y, Z`, with `(x, z) = (1, 1)` meaning `Y`.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use rand::{Rng, RngExt};
 use rayon::prelude::*;
+
+use super::Clifford;
 
 /// A Pauli string: per qubit `I`, `X`, `Y` or `Z`, with a sign.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,18 +102,6 @@ fn multiply_in_place(x1: &mut [u64], z1: &mut [u64], x2: &[u64], z2: &[u64]) -> 
         cnt1 ^= anticommutes;
     }
     (cnt1.count_ones() ^ (cnt2.count_ones() << 1)) & 3
-}
-
-/// Mutable row `dst` and shared row `src` of a row-major table.
-#[inline]
-fn split_rows(table: &mut [u64], dst: usize, src: usize, words: usize) -> (&mut [u64], &[u64]) {
-    if dst < src {
-        let (lo, hi) = table.split_at_mut(src);
-        (&mut lo[dst..dst + words], &hi[..words])
-    } else {
-        let (lo, hi) = table.split_at_mut(dst);
-        (&mut hi[..words], &lo[src..src + words])
-    }
 }
 
 /// The inverse stabilizer tableau of an `n`-qubit state.
@@ -227,6 +219,217 @@ fn transpose_bits(src: &[u64], rows: usize, cols: usize, dst: &mut Vec<u64>) {
                 }
             }
         });
+}
+
+/// Gates in parallel layers are handed out in chunks of this many.
+const LAYER_CHUNK: usize = 32;
+
+/// The row operations gates are made of.
+trait RowOps {
+    fn num_qubits(&self) -> usize;
+    fn multiply_rows(&mut self, dst: usize, src: usize, extra: u32);
+    fn swap_rows(&mut self, a: usize, b: usize);
+    fn flip_sign(&mut self, row: usize, flip: bool);
+}
+
+/// Apply a gate, `C -> G C`: each row `inv(g)` becomes `inv(G† g G)`, a
+/// product of rows. Rows `0..n` are `inv(X_k)`, rows `n..2n` `inv(Z_k)`.
+fn apply_gate(rows: &mut impl RowOps, op: Clifford) {
+    let n = rows.num_qubits();
+    match op {
+        // H† X H = Z, H† Z H = X.
+        Clifford::H(q) => rows.swap_rows(q, n + q),
+        // S† X S = -Y = -i X Z.
+        Clifford::S(q) => rows.multiply_rows(q, n + q, 3),
+        // S X S† = Y = i X Z.
+        Clifford::Sdg(q) => rows.multiply_rows(q, n + q, 1),
+        // X† Z X = -Z.
+        Clifford::X(q) => rows.flip_sign(n + q, true),
+        Clifford::Z(q) => rows.flip_sign(q, true),
+        Clifford::Y(q) => {
+            rows.flip_sign(n + q, true);
+            rows.flip_sign(q, true);
+        }
+        // CX X_c CX = X_c X_t, CX Z_t CX = Z_c Z_t.
+        Clifford::CX(c, t) => {
+            rows.multiply_rows(c, t, 0);
+            rows.multiply_rows(n + t, n + c, 0);
+        }
+        // CZ X_a CZ = X_a Z_b.
+        Clifford::CZ(a, b) => {
+            rows.multiply_rows(a, n + b, 0);
+            rows.multiply_rows(b, n + a, 0);
+        }
+        Clifford::Swap(a, b) => {
+            rows.swap_rows(a, b);
+            rows.swap_rows(n + a, n + b);
+        }
+    }
+}
+
+/// Whether no two gates share a qubit.
+fn disjoint(ops: &[Clifford]) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    ops.iter().all(|op| op.qubits().all(|q| seen.insert(q)))
+}
+
+impl RowOps for Tableau {
+    fn num_qubits(&self) -> usize {
+        self.n
+    }
+
+    fn multiply_rows(&mut self, dst: usize, src: usize, extra: u32) {
+        Tableau::multiply_rows(self, dst, src, extra);
+    }
+
+    fn swap_rows(&mut self, a: usize, b: usize) {
+        Tableau::swap_rows(self, a, b);
+    }
+
+    fn flip_sign(&mut self, row: usize, flip: bool) {
+        Tableau::flip_sign(self, row, flip);
+    }
+}
+
+/// Raw pointers to a row-layout tableau. Operations on distinct rows may
+/// run on different threads: each row's words and occupancy bits belong to
+/// it alone, and sign bits, which share words, are updated atomically.
+#[derive(Clone, Copy)]
+struct RowView<'a> {
+    n: usize,
+    words: usize,
+    occ_words: usize,
+    xs: *mut u64,
+    zs: *mut u64,
+    occ: *mut u64,
+    signs: *mut u64,
+    _tableau: std::marker::PhantomData<&'a mut Tableau>,
+}
+
+// SAFETY: see the type's documentation; callers give each thread its own
+// rows.
+unsafe impl Send for RowView<'_> {}
+unsafe impl Sync for RowView<'_> {}
+
+impl RowView<'_> {
+    fn sign_word(&self, row: usize) -> &AtomicU64 {
+        // SAFETY: `signs` has a word for every row and is 8-byte aligned;
+        // all concurrent access to sign words goes through atomics.
+        unsafe { AtomicU64::from_ptr(self.signs.add(row / 64)) }
+    }
+
+    fn sign(&self, row: usize) -> bool {
+        self.sign_word(row).load(Ordering::Relaxed) >> (row % 64) & 1 == 1
+    }
+
+    /// Update the occupancy bit of word `w` of row `row`.
+    ///
+    /// # Safety
+    /// The caller must own row `row`.
+    unsafe fn update_occ(&self, row: usize, w: usize) {
+        unsafe {
+            let nonzero =
+                *self.xs.add(row * self.words + w) | *self.zs.add(row * self.words + w) != 0;
+            let occ = self.occ.add(row * self.occ_words + w / 64);
+            let b = 1u64 << (w % 64);
+            *occ = (*occ & !b) | if nonzero { b } else { 0 };
+        }
+    }
+}
+
+impl RowOps for RowView<'_> {
+    fn num_qubits(&self) -> usize {
+        self.n
+    }
+
+    fn multiply_rows(&mut self, dst: usize, src: usize, extra: u32) {
+        debug_assert_ne!(dst, src);
+        let (words, ow) = (self.words, self.occ_words);
+        let (d, s) = (dst * words, src * words);
+        // SAFETY: the caller owns rows `dst` and `src`, which are distinct,
+        // so the mutable and shared slices below do not overlap.
+        let phase = unsafe {
+            let src_occ = std::slice::from_raw_parts(self.occ.add(src * ow), ow);
+            let occupied: u32 = src_occ.iter().map(|w| w.count_ones()).sum();
+            if occupied as usize * 4 > words {
+                // Dense rows: the vectorised loop over every word.
+                let phase = multiply_in_place(
+                    std::slice::from_raw_parts_mut(self.xs.add(d), words),
+                    std::slice::from_raw_parts_mut(self.zs.add(d), words),
+                    std::slice::from_raw_parts(self.xs.add(s), words),
+                    std::slice::from_raw_parts(self.zs.add(s), words),
+                );
+                for (i, &bits) in src_occ.iter().enumerate() {
+                    let mut bits = bits;
+                    while bits != 0 {
+                        self.update_occ(dst, i * 64 + bits.trailing_zeros() as usize);
+                        bits &= bits - 1;
+                    }
+                }
+                phase
+            } else {
+                // Sparse rows: only the words where `src` is nonzero change,
+                // and only they contribute to the phase (see
+                // `multiply_in_place`).
+                let (mut cnt1, mut cnt2) = (0u64, 0u64);
+                for (i, &bits) in src_occ.iter().enumerate() {
+                    let mut bits = bits;
+                    let dst_occ = self.occ.add(dst * ow + i);
+                    let mut occ = *dst_occ | bits;
+                    while bits != 0 {
+                        let w = i * 64 + bits.trailing_zeros() as usize;
+                        bits &= bits - 1;
+                        let (x2, z2) = (*self.xs.add(s + w), *self.zs.add(s + w));
+                        let (xd, zd) = (self.xs.add(d + w), self.zs.add(d + w));
+                        let (old_x1, old_z1) = (*xd, *zd);
+                        let (x1, z1) = (old_x1 ^ x2, old_z1 ^ z2);
+                        *xd = x1;
+                        *zd = z1;
+                        let x1z2 = old_x1 & z2;
+                        let anticommutes = (x2 & old_z1) ^ x1z2;
+                        cnt2 ^= (cnt1 ^ x1 ^ z1 ^ x1z2) & anticommutes;
+                        cnt1 ^= anticommutes;
+                        if x1 | z1 == 0 {
+                            occ &= !(1 << (w % 64));
+                        }
+                    }
+                    *dst_occ = occ;
+                }
+                (cnt1.count_ones() ^ (cnt2.count_ones() << 1)) & 3
+            }
+        };
+        let total = 2 * self.sign(dst) as u32 + 2 * self.sign(src) as u32 + phase + extra;
+        debug_assert!(total.is_multiple_of(2), "row product is not Hermitian");
+        self.flip_sign(dst, (total / 2 + self.sign(dst) as u32) % 2 == 1);
+    }
+
+    fn swap_rows(&mut self, a: usize, b: usize) {
+        let (words, ow) = (self.words, self.occ_words);
+        // SAFETY: the caller owns rows `a` and `b`.
+        unsafe {
+            for i in 0..ow {
+                let (oa, ob) = (self.occ.add(a * ow + i), self.occ.add(b * ow + i));
+                let mut bits = *oa | *ob;
+                while bits != 0 {
+                    let w = i * 64 + bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    std::ptr::swap(self.xs.add(a * words + w), self.xs.add(b * words + w));
+                    std::ptr::swap(self.zs.add(a * words + w), self.zs.add(b * words + w));
+                }
+                std::ptr::swap(oa, ob);
+            }
+        }
+        let (sa, sb) = (self.sign(a), self.sign(b));
+        self.flip_sign(a, sa != sb);
+        self.flip_sign(b, sa != sb);
+    }
+
+    fn flip_sign(&mut self, row: usize, flip: bool) {
+        if flip {
+            self.sign_word(row)
+                .fetch_xor(1 << (row % 64), Ordering::Relaxed);
+        }
+    }
 }
 
 impl Tableau {
@@ -384,78 +587,57 @@ impl Tableau {
         if self.gate_in_columns() {
             return self.multiply_rows_in_columns(dst, src, extra);
         }
-        let (words, ow) = (self.words, self.occ_words);
-        let (d, s) = (dst * words, src * words);
-        let occupied: u32 = self.occ[src * ow..(src + 1) * ow]
-            .iter()
-            .map(|w| w.count_ones())
-            .sum();
-        let phase = if occupied as usize * 4 > words {
-            // Dense rows: the vectorised loop over every word.
-            let phase = {
-                // Split the borrows: `dst` and `src` are distinct rows.
-                let (xd, xs) = split_rows(&mut self.xs, d, s, words);
-                let (zd, zs) = split_rows(&mut self.zs, d, s, words);
-                multiply_in_place(xd, zd, xs, zs)
-            };
-            for i in 0..ow {
-                let mut bits = self.occ[src * ow + i];
-                while bits != 0 {
-                    self.update_occ(dst, i * 64 + bits.trailing_zeros() as usize);
-                    bits &= bits - 1;
-                }
-            }
-            phase
-        } else {
-            // Sparse rows: only the words where `src` is nonzero change, and
-            // only they contribute to the phase (see `multiply_in_place`).
-            let (mut cnt1, mut cnt2) = (0u64, 0u64);
-            for i in 0..ow {
-                let mut bits = self.occ[src * ow + i];
-                let mut occ = self.occ[dst * ow + i] | bits;
-                while bits != 0 {
-                    let w = i * 64 + bits.trailing_zeros() as usize;
-                    bits &= bits - 1;
-                    let (x2, z2) = (self.xs[s + w], self.zs[s + w]);
-                    let (old_x1, old_z1) = (self.xs[d + w], self.zs[d + w]);
-                    let (x1, z1) = (old_x1 ^ x2, old_z1 ^ z2);
-                    self.xs[d + w] = x1;
-                    self.zs[d + w] = z1;
-                    let x1z2 = old_x1 & z2;
-                    let anticommutes = (x2 & old_z1) ^ x1z2;
-                    cnt2 ^= (cnt1 ^ x1 ^ z1 ^ x1z2) & anticommutes;
-                    cnt1 ^= anticommutes;
-                    if x1 | z1 == 0 {
-                        occ &= !(1 << (w % 64));
-                    }
-                }
-                self.occ[dst * ow + i] = occ;
-            }
-            (cnt1.count_ones() ^ (cnt2.count_ones() << 1)) & 3
-        };
-        let total = 2 * self.sign(dst) as u32 + 2 * self.sign(src) as u32 + phase + extra;
-        debug_assert!(total.is_multiple_of(2), "row product is not Hermitian");
-        self.flip_sign(dst, (total / 2 + self.sign(dst) as u32) % 2 == 1);
+        self.row_view().multiply_rows(dst, src, extra);
     }
 
     fn swap_rows(&mut self, a: usize, b: usize) {
         if self.gate_in_columns() {
             return self.swap_rows_in_columns(a, b);
         }
-        let ow = self.occ_words;
-        for i in 0..ow {
-            let mut bits = self.occ[a * ow + i] | self.occ[b * ow + i];
-            while bits != 0 {
-                let w = i * 64 + bits.trailing_zeros() as usize;
-                bits &= bits - 1;
-                self.xs.swap(a * self.words + w, b * self.words + w);
-                self.zs.swap(a * self.words + w, b * self.words + w);
-            }
-            self.occ.swap(a * ow + i, b * ow + i);
+        self.row_view().swap_rows(a, b);
+    }
+
+    /// Raw access to the rows (row layout), for gates on distinct rows.
+    fn row_view(&mut self) -> RowView<'_> {
+        debug_assert!(!self.columns);
+        RowView {
+            n: self.n,
+            words: self.words,
+            occ_words: self.occ_words,
+            xs: self.xs.as_mut_ptr(),
+            zs: self.zs.as_mut_ptr(),
+            occ: self.occ.as_mut_ptr(),
+            signs: self.signs.as_mut_ptr(),
+            _tableau: std::marker::PhantomData,
         }
-        let (sa, sb) = (self.sign(a), self.sign(b));
-        self.flip_sign(a, sa != sb);
-        self.flip_sign(b, sa != sb);
+    }
+
+    /// Apply gates that act on pairwise disjoint qubits. They commute and
+    /// touch disjoint rows, so in the row layout they run in parallel; the
+    /// result is the same as applying them in order.
+    pub fn apply_layer(&mut self, ops: &[Clifford]) {
+        let mut rest = ops;
+        // The column layout runs gates one by one (and may switch to rows).
+        while self.columns && !rest.is_empty() {
+            apply_gate(self, rest[0]);
+            rest = &rest[1..];
+        }
+        if rest.len() < 2 * LAYER_CHUNK || rayon::current_num_threads() == 1 {
+            for &op in rest {
+                apply_gate(self, op);
+            }
+            return;
+        }
+        debug_assert!(disjoint(rest), "layer gates must act on disjoint qubits");
+        // Each row operation would have cost the column layout one unit.
+        self.balance = self.balance.saturating_sub(2 * rest.len());
+        let view = self.row_view();
+        rest.par_chunks(LAYER_CHUNK).for_each(|chunk| {
+            let mut view = view;
+            for &op in chunk {
+                apply_gate(&mut view, op);
+            }
+        });
     }
 
     /// [`Tableau::multiply_rows`] in the column layout: gather both rows,
@@ -510,34 +692,27 @@ impl Tableau {
     // -- gates: C -> G C, i.e. inv(g) -> inv(G† g G) ----------------------
 
     pub fn h(&mut self, q: usize) {
-        // H† X H = Z, H† Z H = X.
-        self.swap_rows(self.x_row(q), self.z_row(q));
+        apply_gate(self, Clifford::H(q));
     }
 
     pub fn s(&mut self, q: usize) {
-        // S† X S = -Y = -i X Z.
-        self.multiply_rows(self.x_row(q), self.z_row(q), 3);
+        apply_gate(self, Clifford::S(q));
     }
 
     pub fn sdg(&mut self, q: usize) {
-        // S X S† = Y = i X Z.
-        self.multiply_rows(self.x_row(q), self.z_row(q), 1);
+        apply_gate(self, Clifford::Sdg(q));
     }
 
     pub fn x(&mut self, q: usize) {
-        // X† Z X = -Z.
-        let r = self.z_row(q);
-        self.flip_sign(r, true);
+        apply_gate(self, Clifford::X(q));
     }
 
     pub fn z(&mut self, q: usize) {
-        let r = self.x_row(q);
-        self.flip_sign(r, true);
+        apply_gate(self, Clifford::Z(q));
     }
 
     pub fn y(&mut self, q: usize) {
-        self.x(q);
-        self.z(q);
+        apply_gate(self, Clifford::Y(q));
     }
 
     pub fn sx(&mut self, q: usize) {
@@ -554,15 +729,11 @@ impl Tableau {
     }
 
     pub fn cx(&mut self, control: usize, target: usize) {
-        // CX X_c CX = X_c X_t, CX Z_t CX = Z_c Z_t.
-        self.multiply_rows(self.x_row(control), self.x_row(target), 0);
-        self.multiply_rows(self.z_row(target), self.z_row(control), 0);
+        apply_gate(self, Clifford::CX(control, target));
     }
 
     pub fn cz(&mut self, a: usize, b: usize) {
-        // CZ X_a CZ = X_a Z_b.
-        self.multiply_rows(self.x_row(a), self.z_row(b), 0);
-        self.multiply_rows(self.x_row(b), self.z_row(a), 0);
+        apply_gate(self, Clifford::CZ(a, b));
     }
 
     pub fn cy(&mut self, control: usize, target: usize) {
@@ -573,8 +744,7 @@ impl Tableau {
     }
 
     pub fn swap(&mut self, a: usize, b: usize) {
-        self.swap_rows(self.x_row(a), self.x_row(b));
-        self.swap_rows(self.z_row(a), self.z_row(b));
+        apply_gate(self, Clifford::Swap(a, b));
     }
 
     // -- measurement ------------------------------------------------------
@@ -927,6 +1097,90 @@ impl Tableau {
 mod tests {
     use super::*;
     use rand::{RngExt, SeedableRng};
+
+    /// Random layers of gates on disjoint qubits.
+    fn random_layer(rng: &mut impl Rng, n: usize) -> Vec<Clifford> {
+        let mut qubits: Vec<usize> = (0..n).collect();
+        for i in (1..n).rev() {
+            qubits.swap(i, rng.random_range(0..=i));
+        }
+        let mut ops = Vec::new();
+        let mut rest = &qubits[..];
+        while !rest.is_empty() {
+            let (a, b) = (rest[0], rest.get(1).copied());
+            let pick = rng.random_range(0..9);
+            match (pick, b) {
+                (6..=8, Some(b)) => {
+                    ops.push(
+                        [Clifford::CX(a, b), Clifford::CZ(a, b), Clifford::Swap(a, b)][pick - 6],
+                    );
+                    rest = &rest[2..];
+                }
+                _ => {
+                    ops.push(
+                        [
+                            Clifford::H(a),
+                            Clifford::S(a),
+                            Clifford::Sdg(a),
+                            Clifford::X(a),
+                            Clifford::Y(a),
+                            Clifford::Z(a),
+                        ][pick % 6],
+                    );
+                    rest = &rest[1..];
+                }
+            }
+        }
+        ops
+    }
+
+    #[test]
+    fn parallel_layers_match_sequential_gates() {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
+        let mut rng = rand_pcg::Pcg64::seed_from_u64(11);
+        for (n, layout) in [
+            (300, Layout::Adaptive),
+            (700, Layout::Columns),
+            (130, Layout::Rows),
+        ] {
+            let (mut parallel, mut sequential) = (Tableau::new(n), Tableau::new(n));
+            for t in [&mut parallel, &mut sequential] {
+                t.set_layout(layout);
+            }
+            for round in 0..12 {
+                for _ in 0..3 {
+                    let ops = random_layer(&mut rng, n);
+                    pool.install(|| parallel.apply_layer(&ops));
+                    for &op in &ops {
+                        apply_gate(&mut sequential, op);
+                    }
+                }
+                // Measurements make rows sparse again and, with
+                // Layout::Columns, leave the tableau in the column layout.
+                for _ in 0..n / 4 {
+                    let (q, coin) = (rng.random_range(0..n), rng.random_bool(0.5));
+                    let a = parallel.measure_with(q, || coin);
+                    let b = sequential.measure_with(q, || coin);
+                    assert_eq!(a, b, "n {n} round {round}");
+                }
+                for row in 0..2 * n {
+                    assert_eq!(
+                        parallel.row(row),
+                        sequential.row(row),
+                        "n {n} round {round} row {row}"
+                    );
+                    assert_eq!(
+                        parallel.sign(row),
+                        sequential.sign(row),
+                        "n {n} round {round} row {row}"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn transposes_bit_matrices() {
