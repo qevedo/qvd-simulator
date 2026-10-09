@@ -143,8 +143,16 @@ fn truncation_caps_the_bond_and_tracks_fidelity() {
 fn large_ghz_and_automatic_selection() {
     // 300 qubits: far past the state vector, trivial for an MPS (χ = 2).
     let mut circuit = ghz(300);
-    // Not Clifford, so Auto cannot use the stabilizer backend.
-    circuit.gate(qvd::Gate::T, &[0]).gate(qvd::Gate::Tdg, &[0]);
+    // H T T† H on every qubit is the identity, but not Clifford gate by
+    // gate, and it would leave all 300 qubits active in the near-Clifford
+    // backend: Auto must choose the MPS.
+    for q in 0..300 {
+        circuit
+            .gate(qvd::Gate::H, &[q])
+            .gate(qvd::Gate::T, &[q])
+            .gate(qvd::Gate::Tdg, &[q])
+            .gate(qvd::Gate::H, &[q]);
+    }
     circuit.measure_all();
     let options = Options {
         seed: Some(3),

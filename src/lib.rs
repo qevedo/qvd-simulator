@@ -14,6 +14,7 @@ pub mod matrix;
 mod measure;
 pub mod memory;
 pub mod mps;
+pub mod nearclifford;
 pub mod reference;
 pub mod simd;
 pub mod simulator;

@@ -16,7 +16,11 @@ measurements) samples 10,000 shots in 1.5 s, 8× faster than Stim and
 for a state vector run on a matrix product state backend, exact while the
 entanglement is low and approximate, with a fidelity estimate, beyond: it is
 1.6–14× faster than the faster of Qiskit Aer's and quimb's MPS simulators on
-the same circuits.
+the same circuits. Circuits with few non-Clifford gates run on a
+near-Clifford backend (a Clifford frame around a small dense state, after
+Clifft): a 200-qubit Clifford+T circuit with 20 T gates samples 1000 shots in
+0.11 s, where every Qiskit Aer method either takes over 10 minutes or
+does not support it.
 
 ## How it works
 
@@ -134,6 +138,40 @@ fidelity. Capped bonds use a Gram-matrix eigendecomposition, about twice as
 fast as an SVD. Details are in
 [docs/DESIGN.md](docs/DESIGN.md#8-matrix-product-state-backend-mps).
 
+### Clifford+T circuits (near-Clifford)
+
+Random Clifford+T circuits (`library::random_clifford_t`: layers of random
+one-qubit Cliffords and CX on random pairs, with T gates on random qubits),
+1000 shots, 8 threads.
+
+![Clifford+T benchmark: qvd vs Qiskit Aer](benchmarks/charts/nearclifford.svg)
+
+| Circuit | Peak active qubits | qvd near-Clifford | qvd state vector | Qiskit Aer state vector | Aer extended stabilizer (approximate) | Aer MPS |
+|---|---|---|---|---|---|---|
+| 24 qubits, depth 20, 10 T | 10 | **0.003 s** | 0.55 s | 2.9 s | 508 s | > 600 s |
+| 30 qubits, depth 20, 12 T | 12 | **0.003 s** | 51 s | 210 s | > 600 s | > 600 s |
+| 60 qubits, depth 20, 16 T | 16 | **0.013 s** | — | — | > 600 s | > 600 s |
+| 100 qubits, depth 30, 24 T | 23 | **0.85 s** | — | — | over its 63-qubit limit | > 600 s |
+| 200 qubits, depth 40, 20 T | 20 | **0.11 s** | — | — | over its 63-qubit limit | > 600 s |
+
+Runs were stopped at 600 s. The state vector is double precision (qvd's
+30-qubit run spends most of its time on the CX gates between random qubit
+pairs, which fuse poorly). The CX layers make these circuits highly
+entangled, which is why the MPS methods cannot follow.
+
+The backend keeps `|ψ> = C (|φ> ⊗ |0...0>)`. `C` is a Clifford frame (an
+inverse stabilizer tableau), and `φ` is a dense state of the few *active*
+qubits:
+- Clifford gates only update `C`.
+- A non-Clifford rotation activates at most one qubit.
+- Measurements retire active qubits again.
+
+The cost is exponential only in the peak number of active qubits. A dry run
+of the frame computes that peak exactly before simulating, and `Backend::Auto`
+uses it to choose this backend when it beats the state vector by a wide
+margin. Final measurements are sampled with per-shot Pauli frames, so 1000
+shots cost little more than one.
+
 ## How many qubits?
 
 A full state of *n* qubits holds 2ⁿ amplitudes: 8 bytes each in single
@@ -151,6 +189,8 @@ source shows a general 40-qubit simulation on one workstation: the records
 (45 qubits in 2017, 50 in 2025) used supercomputers. Larger qubit counts on
 one machine are possible only for circuits with structure: Clifford
 circuits (qvd's stabilizer backend handles 20,000 qubits in seconds),
+Clifford circuits with a few non-Clifford gates (qvd's near-Clifford
+backend: 200 qubits with 20 T gates in a tenth of a second),
 low-entanglement circuits (qvd's MPS backend: 100 qubits and more), or a few
 amplitudes rather than the whole state.
 
@@ -181,8 +221,11 @@ significant bit), and `Circuit::to_qasm` exports OpenQASM 2.
 
 `run` picks the backend: with the default `Backend::Auto`, circuits made only
 of Clifford gates (including rotations by multiples of π/2), measurements and
-resets run on the stabilizer backend; everything else runs on the state
-vector if it fits in 80% of memory, and on a matrix product state if not.
+resets run on the stabilizer backend. Circuits with few non-Clifford gates
+run on the near-Clifford backend when at most 28 qubits are ever active in
+it and it is much cheaper than the state vector (or the state vector does
+not fit). Everything else runs on the state vector if it fits in 80% of
+memory, and on a matrix product state if not.
 `Backend::Mps` forces the MPS; `Options::max_bond_dimension` (default 256)
 and `Options::truncation_threshold` (default 10⁻¹⁶) set its truncation, and
 `result.stats.fidelity` reports the estimated fidelity. For many shots or
@@ -217,6 +260,7 @@ cargo run --release --example bench -- random 28 20 f32 4 14 --qasm /tmp/c.qasm
 cargo run --release --example shots -- 28 1000000
 cargo run --release --example stabilizer -- surface 101 101 10000 --qasm /tmp/s.qasm
 cargo run --release --example mps -- random 64 20 256 1000 --qasm /tmp/m.qasm
+cargo run --release --example nearclifford -- 100 30 24 1000 --qasm /tmp/n.qasm
 
 # Compare with Qiskit Aer and qsim on the same circuit:
 python3 -m venv .bench-venv
@@ -228,6 +272,9 @@ python3 -m venv .bench-venv
 
 # MPS circuits against Qiskit Aer and quimb (pip install quimb):
 .bench-venv/bin/python benchmarks/compare_mps.py /tmp/m.qasm --max-bond 256 --shots 1000
+
+# Clifford+T circuits against Qiskit Aer (extended stabilizer, MPS, state vector):
+.bench-venv/bin/python benchmarks/compare_nearclifford.py /tmp/n.qasm --shots 1000
 
 # Redraw benchmarks/charts/ from benchmarks/results/*.csv:
 .bench-venv/bin/python benchmarks/plot.py
@@ -243,9 +290,10 @@ off). `QVD_PLACEMENT=pcores|pthreads|allcores|all` selects the threads.
    Clifford circuits).
 2. ~~Matrix product state backend~~ (done; chosen automatically when the
    state vector does not fit).
-3. Near-Clifford backend (Clifford frame + small dense state, reusing these
-   kernels) and Pauli propagation for expectation values.
-4. Backend selection beyond the Clifford check.
+3. ~~Near-Clifford backend~~ (done; chosen automatically when it is much
+   cheaper than the state vector).
+4. Pauli propagation for expectation values, and a backend selector
+   calibrated by benchmarks on this machine.
 5. OpenQASM input, Python bindings and noise (Pauli noise channels fit the
    frame simulator directly).
 

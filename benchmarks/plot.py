@@ -39,6 +39,11 @@ COLORS = {
     "stim, sample()": "#8fb8de",
     "qiskit-aer, stabilizer": "#edae49",
     "quimb": "#66a182",
+    "qvd, near-Clifford": "#d1495b",
+    "qvd, state vector": "#f4a4ae",
+    "qiskit-aer, statevector": "#edae49",
+    "qiskit-aer, extended_stabilizer": "#00798c",
+    "qiskit-aer, matrix_product_state": "#8fb8de",
 }
 
 
@@ -175,8 +180,67 @@ def mps():
     save(fig, "mps.svg")
 
 
+def nearclifford():
+    rows = read("nearclifford.csv")
+    cases = []
+    times = defaultdict(dict)
+    for r in rows:
+        case = (int(r["qubits"]), int(r["t_count"]))
+        if case not in cases:
+            cases.append(case)
+        name = f"{r['simulator']}, {r['method']}"
+        times[name][case] = (float(r["seconds"]) if r["seconds"] else None, r["status"])
+    series = [
+        "qvd, near-Clifford",
+        "qvd, state vector",
+        "qiskit-aer, statevector",
+        "qiskit-aer, extended_stabilizer",
+        "qiskit-aer, matrix_product_state",
+    ]
+    labels = {
+        "qvd, near-Clifford": "qvd near-Clifford",
+        "qvd, state vector": "qvd state vector",
+        "qiskit-aer, statevector": "Aer state vector",
+        "qiskit-aer, extended_stabilizer": "Aer extended stabilizer (approximate)",
+        "qiskit-aer, matrix_product_state": "Aer MPS",
+    }
+    width = 0.16
+    fig, ax = plt.subplots(figsize=(11, 4.6))
+    limit = max(t for s in times.values() for t, status in s.values() if t is not None)
+    for i, name in enumerate(series):
+        for c, case in enumerate(cases):
+            if case not in times[name]:
+                continue
+            t, status = times[name][case]
+            if status == "failed":
+                # Not supported (Aer's extended stabilizer stops at 63 qubits).
+                continue
+            x = c + (i - 2) * width
+            if status == "timeout":
+                # Stopped at the time limit: an open bar to the limit.
+                ax.bar(x, t, width, color="white", edgecolor=COLORS[name], hatch="///", linewidth=1)
+                ax.text(x, t * 1.15, ">", ha="center", fontsize=8, color=COLORS[name])
+            else:
+                first = all(times[name].get(cs, (None, "failed"))[1] != "ok" for cs in cases[:c])
+                bar = ax.bar(x, t, width, color=COLORS[name], label=labels[name] if first else None)
+                if name == "qvd, near-Clifford":
+                    ax.bar_label(bar, labels=[f"{t:g}"], fontsize=8, padding=2)
+    ax.set_yscale("log")
+    ax.set_ylim(top=limit * 20)
+    ax.set_ylabel("seconds for 1000 shots (log scale)")
+    ax.set_xticks(range(len(cases)))
+    ax.set_xticklabels([f"{q} qubits\n{t} T gates" for q, t in cases])
+    ax.set_title("Clifford+T circuits, 1000 shots (hatched: stopped at 600 s; no bar: not supported or too large)")
+    from matplotlib.patches import Patch
+
+    handles = [Patch(facecolor=COLORS[name], label=labels[name]) for name in series]
+    ax.legend(handles=handles, frameon=False, ncols=3, loc="upper left", fontsize=9)
+    save(fig, "nearclifford.svg")
+
+
 if __name__ == "__main__":
     statevector()
+    nearclifford()
     mps()
     stabilizer()
     stabilizer_steps()

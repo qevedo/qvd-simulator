@@ -1047,6 +1047,125 @@ impl Tableau {
         }
     }
 
+    // -- near-Clifford support --------------------------------------------
+
+    /// Prepend a Clifford `V` to the state's circuit (`C -> C V`), for the
+    /// near-Clifford backend's virtual frame: every row `inv(g)` becomes
+    /// `V† inv(g) V`, a column operation. Keeps the column layout from then
+    /// on.
+    pub(crate) fn prepend(&mut self, op: Clifford) {
+        self.layout = Layout::Columns;
+        self.use_columns();
+        let cw = self.column_words;
+        let column = |q: usize| q * cw..(q + 1) * cw;
+        match op {
+            Clifford::H(q) => {
+                // H X H = Z, H Y H = -Y.
+                for i in column(q) {
+                    let (x, z) = (self.xs[i], self.zs[i]);
+                    self.signs[i - q * cw] ^= x & z;
+                    self.xs[i] = z;
+                    self.zs[i] = x;
+                }
+                self.refresh_cache(q);
+            }
+            Clifford::S(q) => {
+                // S† X S = -Y, S† Y S = X.
+                for i in column(q) {
+                    let (x, z) = (self.xs[i], self.zs[i]);
+                    self.signs[i - q * cw] ^= x & !z;
+                    self.zs[i] = z ^ x;
+                }
+            }
+            Clifford::Sdg(q) => {
+                // S X S† = Y, S Y S† = -X.
+                for i in column(q) {
+                    let (x, z) = (self.xs[i], self.zs[i]);
+                    self.signs[i - q * cw] ^= x & z;
+                    self.zs[i] = z ^ x;
+                }
+            }
+            Clifford::X(q) => {
+                for i in column(q) {
+                    self.signs[i - q * cw] ^= self.zs[i];
+                }
+            }
+            Clifford::Z(q) => {
+                for i in column(q) {
+                    self.signs[i - q * cw] ^= self.xs[i];
+                }
+            }
+            Clifford::Y(q) => {
+                for i in column(q) {
+                    self.signs[i - q * cw] ^= self.xs[i] ^ self.zs[i];
+                }
+            }
+            Clifford::CX(c, t) => {
+                self.cx_columns(c, t);
+                self.refresh_cache(t);
+            }
+            Clifford::CZ(a, b) => {
+                // CZ X_a CZ = X_a Z_b.
+                for i in 0..cw {
+                    let (xa, za, xb, zb) = (
+                        self.xs[a * cw + i],
+                        self.zs[a * cw + i],
+                        self.xs[b * cw + i],
+                        self.zs[b * cw + i],
+                    );
+                    self.signs[i] ^= xa & xb & (za ^ zb);
+                    self.zs[a * cw + i] = za ^ xb;
+                    self.zs[b * cw + i] = zb ^ xa;
+                }
+            }
+            Clifford::Swap(a, b) => {
+                for i in 0..cw {
+                    self.xs.swap(a * cw + i, b * cw + i);
+                    self.zs.swap(a * cw + i, b * cw + i);
+                }
+                self.refresh_cache(a);
+                self.refresh_cache(b);
+            }
+        }
+    }
+
+    /// `C† P C` for a physical Pauli `P` given as `(qubit, 'X' | 'Y' | 'Z')`
+    /// factors on distinct qubits: a Pauli on the virtual qubits, returned
+    /// as its sign (`true` for minus) and x and z bits (64 qubits a word,
+    /// `(1, 1)` meaning Y).
+    pub(crate) fn pull_back(&self, pauli: &[(usize, char)]) -> (bool, Vec<u64>, Vec<u64>) {
+        let words = self.words;
+        let (mut xs, mut zs) = (vec![0u64; words], vec![0u64; words]);
+        let mut exponent = 0u32;
+        let multiply = |row: usize, xs: &mut [u64], zs: &mut [u64]| -> u32 {
+            let (rx, rz) = self.row(row);
+            let phase = product_phase(xs, zs, &rx, &rz);
+            for w in 0..words {
+                xs[w] ^= rx[w];
+                zs[w] ^= rz[w];
+            }
+            phase + 2 * self.sign(row) as u32
+        };
+        for &(q, p) in pauli {
+            match p {
+                'X' => exponent += multiply(self.x_row(q), &mut xs, &mut zs),
+                'Z' => exponent += multiply(self.z_row(q), &mut xs, &mut zs),
+                'Y' => {
+                    // Y = i X Z.
+                    exponent += multiply(self.x_row(q), &mut xs, &mut zs);
+                    exponent += multiply(self.z_row(q), &mut xs, &mut zs);
+                    exponent += 1;
+                }
+                other => panic!("not a Pauli: {other}"),
+            }
+        }
+        debug_assert!(
+            exponent.is_multiple_of(2),
+            "the pulled-back Pauli must be Hermitian"
+        );
+        ((exponent / 2) % 2 == 1, xs, zs)
+    }
+
     /// `<psi| P |psi>` for a Pauli string: `+1`, `-1` or `0`.
     pub fn expectation(&self, pauli: &PauliString) -> i32 {
         assert_eq!(

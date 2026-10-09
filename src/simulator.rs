@@ -26,6 +26,10 @@ pub enum Backend {
     /// Matrix product state: any circuit and size, exact while the
     /// entanglement fits in `max_bond_dimension`, approximate beyond.
     Mps,
+    /// Clifford frame around a dense state of the "active" qubits: exact,
+    /// any size, exponential only in the number of non-Clifford rotations
+    /// whose effect is still active.
+    NearClifford,
 }
 
 /// Simulator settings.
@@ -81,6 +85,9 @@ pub struct Stats {
     pub fidelity: Option<f64>,
     /// MPS: the largest bond dimension reached.
     pub max_bond_dimension: Option<usize>,
+    /// Near-Clifford: the largest number of active qubits (the dense part's
+    /// size is two to that power).
+    pub peak_active_qubits: Option<usize>,
 }
 
 /// The result of running a circuit with shots.
@@ -228,6 +235,20 @@ pub(crate) fn bitstring(clbits: &[bool]) -> String {
         .collect()
 }
 
+/// `Backend::Auto` uses the near-Clifford backend (for circuits too large for
+/// the state vector) when at most this many qubits are ever active: 4 GiB
+/// of amplitudes per state, and shots then run one at a time.
+const MAX_ACTIVE_QUBITS: usize = 28;
+
+/// Whether the near-Clifford backend's dense work (about one pass over
+/// `2^peak` amplitudes per non-Clifford rotation) is well below the state
+/// vector's (about one pass over `2^n` per 8 gates, after fusion).
+fn near_clifford_is_cheaper(circuit: &Circuit, peak: usize) -> bool {
+    let rotations = crate::nearclifford::rotation_count(circuit).max(1) as f64;
+    let gates = circuit.gate_count().max(1) as f64;
+    rotations * 2f64.powi(peak as i32) * 8.0 * 4.0 <= gates * 2f64.powi(circuit.num_qubits as i32)
+}
+
 /// Whether a state vector of `n` qubits in precision `T` fits in 80% of
 /// physical memory.
 fn state_vector_fits<T: Real>(n: usize) -> bool {
@@ -246,9 +267,11 @@ fn state_vector_fits<T: Real>(n: usize) -> bool {
 /// Run `circuit` for `shots` shots and count the classical outcomes.
 ///
 /// With [`Backend::Auto`], Clifford circuits go to the stabilizer backend
-/// (any number of qubits), others to the state vector with precision `T`
-/// if it fits in 80% of physical memory, and to a matrix product state if
-/// not. On the state vector, circuits whose measurements all come at the
+/// (any number of qubits). Others go to the near-Clifford backend if at most
+/// 28 qubits are ever active in it and either the state vector (precision
+/// `T`, at most 80% of physical memory) does not fit or its estimated dense
+/// work is four times the near-Clifford one; then to the state vector if it
+/// fits, and to a matrix product state if not. On the state vector, circuits whose measurements all come at the
 /// end are simulated once and sampled; mid-circuit measurements and resets
 /// are simulated shot by shot.
 pub fn run<T: Real>(
@@ -258,8 +281,18 @@ pub fn run<T: Real>(
 ) -> std::io::Result<RunResult> {
     let backend = match options.backend {
         Backend::Auto if crate::stabilizer::is_clifford(circuit) => Backend::Stabilizer,
-        Backend::Auto if !state_vector_fits::<T>(circuit.num_qubits) => Backend::Mps,
-        Backend::Auto => Backend::StateVector,
+        Backend::Auto => {
+            let fits = state_vector_fits::<T>(circuit.num_qubits);
+            let peak = crate::nearclifford::peak_active_qubits(circuit)
+                .filter(|&p| p <= MAX_ACTIVE_QUBITS);
+            match peak {
+                Some(peak) if !fits || near_clifford_is_cheaper(circuit, peak) => {
+                    Backend::NearClifford
+                }
+                _ if fits => Backend::StateVector,
+                _ => Backend::Mps,
+            }
+        }
         chosen => chosen,
     };
     match backend {
@@ -268,6 +301,10 @@ pub fn run<T: Real>(
                 .map_err(std::io::Error::other);
         }
         Backend::Mps => return Ok(crate::mps::run(circuit, shots, options)),
+        Backend::NearClifford => {
+            return crate::nearclifford::run(circuit, shots, options.seed)
+                .map_err(std::io::Error::other);
+        }
         _ => {}
     }
     let mut rng = match options.seed {

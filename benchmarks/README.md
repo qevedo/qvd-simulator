@@ -11,11 +11,13 @@ benchmarks/
 │   ├── statevector.csv         dense simulation: qvd vs qsim vs Qiskit Aer
 │   ├── stabilizer.csv          Clifford circuits: qvd vs Stim vs Qiskit Aer
 │   ├── mps.csv                 matrix product states: qvd vs Qiskit Aer vs quimb
+│   ├── nearclifford.csv        Clifford+T circuits: qvd vs Qiskit Aer
 │   └── stabilizer_steps.csv    how each optimisation changed the d=101 time
 ├── charts/                     SVGs drawn from results/ by plot.py
 ├── compare.py                  times Qiskit Aer and qsim on a QASM file
 ├── compare_stim.py             times Stim and Qiskit Aer's stabilizer method
 ├── compare_mps.py              times Qiskit Aer's and quimb's MPS simulators
+├── compare_nearclifford.py     times Qiskit Aer's methods on Clifford+T circuits
 └── plot.py                     results/*.csv -> charts/*.svg
 ```
 
@@ -79,6 +81,18 @@ total; `mps.csv` has gate and sampling times for the other two, and the
 fidelity estimates. A busy virtual machine shared the machine during these
 runs, for all three alike.
 
+## Clifford+T circuits
+
+![Clifford+T benchmark](charts/nearclifford.svg)
+
+Random Clifford+T circuits from `library::random_clifford_t` (layers of
+random one-qubit Cliffords and CX on random pairs, T gates on random
+qubits), 1000 shots, 8 threads. qvd's near-Clifford time is the best of
+three; every Aer method ran in its own process, stopped at 600 s. Aer's
+`extended_stabilizer` is approximate and rejects circuits over 63 qubits;
+there is no state vector past 30 qubits. A virtual machine shared the
+machine during these runs.
+
 ## Reproducing
 
 ```sh
@@ -97,6 +111,11 @@ cargo run --release --example stabilizer -- surface 51 51 10000 --qasm /tmp/s.qa
 cargo run --release --example mps -- random 64 20 256 1000 --qasm /tmp/m.qasm
 .bench-venv/bin/python benchmarks/compare_mps.py /tmp/m.qasm --max-bond 256 --shots 1000
 
+# Clifford+T: 100 qubits, depth 30, 24 T gates, 1000 shots.
+cargo run --release --example nearclifford -- 100 30 24 1000 --qasm /tmp/n.qasm
+.bench-venv/bin/python benchmarks/compare_nearclifford.py /tmp/n.qasm --shots 1000 \
+    --methods matrix_product_state,extended_stabilizer
+
 # After editing results/*.csv:
 .bench-venv/bin/python benchmarks/plot.py
 ```
@@ -107,4 +126,5 @@ off); `QVD_PLACEMENT=pcores|pthreads|allcores|all` selects the threads. The
 `stabilizer` example takes `surface <distance> <rounds> <shots>` or
 `random <qubits> <depth> <shots>`; `QVD_THREADS=pcores|all|<n>` selects the
 threads (P-cores by default). The `mps` example takes
-`<random|grid|qft|ghz> <qubits | ROWSxCOLS> <depth> <max bond> [shots]`.
+`<random|grid|qft|ghz> <qubits | ROWSxCOLS> <depth> <max bond> [shots]`, and
+the `nearclifford` example `<qubits> <depth> <T count> [shots] [--backend nc|sv|mps]`.

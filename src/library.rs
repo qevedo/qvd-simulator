@@ -246,3 +246,31 @@ pub fn random_clifford(n: usize, depth: usize, seed: u64) -> Circuit {
     }
     c
 }
+
+/// A random Clifford+T circuit: the layers of [`random_clifford`], with
+/// `t_count` T gates on random qubits after random layers. The kind of
+/// circuit near-Clifford simulators are built for: entangling Cliffords on
+/// many qubits, few non-Clifford gates.
+pub fn random_clifford_t(n: usize, depth: usize, t_count: usize, seed: u64) -> Circuit {
+    let mut rng = Pcg64::seed_from_u64(seed ^ 0x5eed);
+    let mut placements: Vec<(usize, usize)> = (0..t_count)
+        .map(|_| (rng.random_range(0..depth.max(1)), rng.random_range(0..n)))
+        .collect();
+    placements.sort();
+    let layers = random_clifford(n, depth, seed);
+    // Each layer of `random_clifford` is n one-qubit gates and n/2 CX.
+    let per_layer = n + n / 2;
+    let mut c = Circuit::new(n);
+    let mut next = placements.iter().peekable();
+    for (i, instruction) in layers.instructions.into_iter().enumerate() {
+        c.instructions.push(instruction);
+        if (i + 1) % per_layer == 0 {
+            let layer = i / per_layer;
+            while let Some(&&(_, q)) = next.peek().filter(|p| p.0 == layer) {
+                c.gate(Gate::T, &[q]);
+                next.next();
+            }
+        }
+    }
+    c
+}

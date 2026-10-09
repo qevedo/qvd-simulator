@@ -413,7 +413,96 @@ mid-circuit measurement and reset against exact branching, truncation
 bounds and fidelity tracking, a 300-qubit GHZ state chosen automatically,
 long-range routing, and reproducibility across thread counts.
 
-## 9. Not done yet
+## 9. Near-Clifford backend (`nearclifford/`)
+
+Circuits that are mostly Clifford, with a few non-Clifford gates (T gates,
+small rotations, Toffolis), are what error-correction and magic-state
+experiments look like. Following Clifft (Chase & Labib, arXiv:2604.27058),
+the state is kept as `|ψ> = C (|φ>_A ⊗ |0...0>_D)`: a Clifford frame `C`
+(an inverse stabilizer tableau, reusing `stabilizer/`) around a dense
+vector `φ` of the few *active* virtual qubits, with the other virtual
+qubits *dormant* in `|0>`.
+
+**Gates.** Clifford gates update only the frame. Every other gate is
+lowered, exactly up to global phase, to Cliffords and Pauli rotations
+`exp(-iθ/2 P)`:
+- T, RZ, RX, RY and U become one to three rotations;
+- CP, CRZ, CRX, CRY, RZZ and RXX become one to three rotations, some on two
+  qubits;
+- CH, CCX and CSWAP use their standard Clifford+T circuits;
+- one-qubit unitaries use ZYZ Euler angles.
+
+A rotation's Pauli, pulled back through the frame (`C† P C`), acts on
+dormant qubits only through its X parts, since Z on `|0>` is `+1`. If it has
+none, the rotation is applied to `φ` alone. Otherwise CX gates between the
+dormant qubits gather those X parts onto one of them. The CX gates are
+prepended to the frame (`C -> C W`), and `W` fixes `|0...0>`, so `φ` does
+not change. That qubit then becomes active, doubling `φ`. So each
+non-Clifford rotation activates at most one qubit.
+
+**Measurements.** A Z measurement pulls `Z_q` back the same way:
+- **X on a dormant qubit `d`:** the outcome is exactly 50/50. The collapsed
+  state, `φ⊗|0> ± (P_A φ)⊗|1>`, equals `CP_A · H_d · X_d^b (φ⊗|0>)`, so the
+  collapse is three Cliffords prepended to the frame, with no dense work.
+- **Active qubits only:** it is measured on `φ`. A Clifford on the active
+  qubits (applied to `φ` and prepended to the frame) then turns the measured
+  Pauli into Z on one qubit, which is retired to dormant, halving `φ`.
+
+The cost is exponential only in the number of active qubits. A dry run of
+the frame alone finds the exact peak, because which qubits are active never
+depends on measurement outcomes: `nearclifford::peak_active_qubits`.
+
+**Sampling.** Shots are not simulated one by one:
+- **Before the final measurements,** each measurement or reset is done once
+  per branch of a measurement tree. Its probability splits the branch's
+  shots binomially. Branches share `φ` copy-on-write.
+- **The final measurements** use per-shot Pauli frames, as in Clifft. Each
+  shot's state is `C P_s (φ⊗0)` for a Pauli `P_s`, kept 64 shots per word,
+  conjugated by every Clifford prepended to the frame. A fixed outcome flips
+  where `P_s` anticommutes with the measured Pauli. A 50/50 one collapses
+  the shared state once and puts each shot's random outcome into its frame
+  as `X_d`.
+- **Only measurements on `φ` branch,** and only on their outcome in the
+  shared state. The measurements that act on `φ` go first, each halving it,
+  so the dense work is about `k·2^k` for any number of shots.
+
+On 100 qubits with 23 active, 1000 shots took 214 s shot by shot, 38 s with
+the tree alone and 1.3 s with the frames.
+
+**Correctness** (`tests/nearclifford.rs`, plus unit tests of the dense
+kernels):
+- expectation values of random Pauli strings after random circuits over the
+  full gate set, against the dense reference;
+- measurement collapse against dense projection;
+- sampled distributions with mid-circuit measurement and reset against exact
+  branching (checked again with 2 million shots: worst deviation 2.1σ over
+  48 outcomes);
+- a 200-qubit GHZ state with a T gate, checked against its analytic
+  expectation values;
+- the dry-run peak against real runs, automatic selection, and
+  reproducibility across thread counts.
+
+**Against Qiskit Aer** (random Clifford+T circuits from
+`library::random_clifford_t`, 1000 shots, 8 threads;
+`benchmarks/compare_nearclifford.py`):
+
+| Circuit | Peak active qubits | qvd near-Clifford | qvd state vector | Qiskit Aer state vector | Aer extended stabilizer (approximate) | Aer MPS |
+|---|---|---|---|---|---|---|
+| 24 qubits, depth 20, 10 T | 10 | **0.003 s** | 0.55 s | 2.9 s | 508 s | > 600 s |
+| 30 qubits, depth 20, 12 T | 12 | **0.003 s** | 51 s | 210 s | > 600 s | > 600 s |
+| 60 qubits, depth 20, 16 T | 16 | **0.013 s** | — | — | > 600 s | > 600 s |
+| 100 qubits, depth 30, 24 T | 23 | **0.85 s** | — | — | over its 63-qubit limit | > 600 s |
+| 200 qubits, depth 40, 20 T | 20 | **0.11 s** | — | — | over its 63-qubit limit | > 600 s |
+
+Runs were stopped at 600 s. The state vector is double precision (qvd's
+30-qubit run spends most of its time on the CX gates between random qubit
+pairs, which fuse poorly). The CX layers make these circuits highly
+entangled, which is why the MPS methods cannot follow. The dense work is exponential in the peak
+number of active qubits (at most one per T gate), not in the qubit count,
+so 200 qubits with 20 T gates (peak 20) cost less than 100 qubits with 24
+(peak 23).
+
+## 10. Not done yet
 
 - **Calibration.** Fusion width (4) and region size (2^14 blocks) are fixed
   defaults chosen from the measurements above. A per-machine calibration
@@ -421,10 +510,14 @@ long-range routing, and reproducibility across thread counts.
   them.
 - **Smarter stage planning.** The lookahead is greedy; Atlas finds a
   minimal number of stages with an ILP.
-- **Other backends.** Near-Clifford and Pauli propagation backends, and
-  selection beyond "Clifford, else state vector if it fits, else MPS" (for
-  example from gate counts crossing each cut, which bound χ), are the
-  roadmap in the README.
+- **Other backends.** Pauli propagation for expectation values, and a
+  cost-based selector calibrated on this machine (the current one compares
+  rough work estimates), are the roadmap in the README.
+- **Near-Clifford.** Gates after mid-circuit measurements multiply with the
+  branches of the measurement tree. Pauli frames could carry them too (as
+  in Clifft) when the gates are Clifford. Rotations whose angle is a
+  multiple of π/2 inside decompositions could be frame updates rather
+  than dense passes.
 - **Faster capped MPS.** Gates that truncate still run one at a time
   (simultaneous truncation costs too much fidelity, see section 8). Each one
   is a Gram eigendecomposition or SVD; a randomized range finder would cut

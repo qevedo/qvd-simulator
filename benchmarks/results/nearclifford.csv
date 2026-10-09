@@ -1,0 +1,20 @@
+qubits,depth,t_count,shots,simulator,method,version,threads,seconds,status,peak_active_qubits
+24,20,10,1000,qvd,near-Clifford,0.1.0,8,0.003,ok,10
+24,20,10,1000,qvd,state vector,0.1.0,8,0.555,ok,
+24,20,10,1000,qiskit-aer,statevector,0.17.2,8,2.918,ok,
+24,20,10,1000,qiskit-aer,matrix_product_state,0.17.2,8,600,timeout,
+24,20,10,1000,qiskit-aer,extended_stabilizer,0.17.2,8,507.600,ok,
+30,20,12,1000,qvd,near-Clifford,0.1.0,8,0.003,ok,12
+30,20,12,1000,qvd,state vector,0.1.0,8,51.298,ok,
+30,20,12,1000,qiskit-aer,statevector,0.17.2,8,210.119,ok,
+30,20,12,1000,qiskit-aer,matrix_product_state,0.17.2,8,600,timeout,
+30,20,12,1000,qiskit-aer,extended_stabilizer,0.17.2,8,600,timeout,
+60,20,16,1000,qvd,near-Clifford,0.1.0,8,0.013,ok,16
+60,20,16,1000,qiskit-aer,matrix_product_state,0.17.2,8,600,timeout,
+60,20,16,1000,qiskit-aer,extended_stabilizer,0.17.2,8,600,timeout,
+100,30,24,1000,qvd,near-Clifford,0.1.0,8,0.851,ok,23
+100,30,24,1000,qiskit-aer,matrix_product_state,0.17.2,8,600,timeout,
+100,30,24,1000,qiskit-aer,extended_stabilizer,0.17.2,8,0.032,failed,
+200,40,20,1000,qvd,near-Clifford,0.1.0,8,0.107,ok,20
+200,40,20,1000,qiskit-aer,matrix_product_state,0.17.2,8,600,timeout,
+200,40,20,1000,qiskit-aer,extended_stabilizer,0.17.2,8,0.161,failed,
