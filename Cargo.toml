@@ -1,0 +1,30 @@
+[package]
+name = "qvd"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+description = "A quantum circuit state-vector simulator built for memory bandwidth: AVX2 kernels, gate fusion and cache-blocked stages"
+license = "MIT"
+repository = "https://github.com/qevedo/qvd-simulator"
+keywords = ["quantum", "simulator", "quantum-computing", "statevector", "simd"]
+categories = ["science", "simulation"]
+
+[dependencies]
+core_affinity = "0.8.3"
+libc = "0.2.190"
+num-complex = "0.4.6"
+rand = "0.10.3"
+rand_pcg = "0.10.2"
+rayon = "1.12.0"
+
+[dev-dependencies]
+approx = "0.5.1"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = "line-tables-only"
+
+[profile.bench]
+inherits = "release"

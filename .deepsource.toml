@@ -1,6 +1,13 @@
 version = 1
 
 [[analyzers]]
+name = "rust"
+enabled = true
+
+  [analyzers.meta]
+  msrv = "1.87.0"
+
+[[analyzers]]
 name = "python"
 enabled = true
 
