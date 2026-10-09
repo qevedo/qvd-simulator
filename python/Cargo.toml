@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.87"
 description = "Python bindings of the qvd quantum circuit simulator (qevedo.simulator)"
 license = "MIT"
-repository = "https://github.com/qevedo/qvd-simulator"
+repository = "https://github.com/qevedo/qevedo-simulator"
 publish = false
 
 [lib]

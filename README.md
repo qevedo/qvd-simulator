@@ -1,4 +1,9 @@
-# qvd-simulator
+# qevedo-simulator
+
+[![CI](https://github.com/qevedo/qevedo-simulator/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/qevedo/qevedo-simulator/actions/workflows/ci.yml)
+
+`qvd`, the simulator in this repository, is a Rust crate and the Python
+package `qevedo-simulator` (imported as `qevedo.simulator`).
 
 A quantum circuit simulator in Rust, built around one fact: on a modern CPU,
 simulating a large circuit is limited by **memory bandwidth**, not by

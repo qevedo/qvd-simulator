@@ -21,8 +21,8 @@ numpy = ["numpy>=1.24"]
 test = ["pytest>=7", "numpy>=1.24"]
 
 [project.urls]
-Homepage = "https://github.com/qevedo/qvd-simulator"
-Repository = "https://github.com/qevedo/qvd-simulator"
+Homepage = "https://github.com/qevedo/qevedo-simulator"
+Repository = "https://github.com/qevedo/qevedo-simulator"
 
 [tool.maturin]
 # `qevedo` is a namespace package shared with qevedo-compiler: no

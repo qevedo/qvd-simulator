@@ -5,7 +5,7 @@ name: Release
 #
 # Publishing uses PyPI trusted publishing: on pypi.org, add a (pending)
 # trusted publisher for project "qevedo-simulator", owner "qevedo",
-# repository "qvd-simulator", workflow "release.yml", environment "pypi".
+# repository "qevedo-simulator", workflow "release.yml", environment "pypi".
 #
 # x86-64 wheels target x86-64-v3 (AVX2 + FMA, 2013-2015 processors and newer)
 # for qvd's AVX2 kernels; the repository's own `-C target-cpu=native` must not

@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.87"
 description = "A fast quantum circuit simulator: an AVX2 state vector built for memory bandwidth, a stabilizer backend for Clifford circuits and a matrix product state backend for low entanglement"
 license = "MIT"
-repository = "https://github.com/qevedo/qvd-simulator"
+repository = "https://github.com/qevedo/qevedo-simulator"
 keywords = ["quantum", "simulator", "quantum-computing", "statevector", "simd"]
 categories = ["science", "simulation"]
 

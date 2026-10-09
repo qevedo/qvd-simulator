@@ -1,6 +1,6 @@
 # qevedo-simulator
 
-Python bindings of [qvd](https://github.com/qevedo/qvd-simulator), a fast
+Python bindings of [qvd](https://github.com/qevedo/qevedo-simulator), a fast
 quantum circuit simulator written in Rust. It installs as
 `qevedo-simulator` and imports as `qevedo.simulator`.
 
