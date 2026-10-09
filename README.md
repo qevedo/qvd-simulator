@@ -9,6 +9,11 @@ On an Intel i9-14900K (24 cores, AVX2, 62 GB RAM) it runs 3–4× faster than
 Google's qsim and 7–12× faster than Qiskit Aer on the same circuits (details
 below).
 
+Clifford circuits go to a stabilizer backend instead, which has no 2ⁿ
+memory wall: a distance-101 surface code (20,401 qubits, 5.1M gates, 1M
+measurements) samples 10,000 shots in 2.8 s, 4.5× faster than Stim and
+2.8× faster on a single thread (details below).
+
 ## How it works
 
 | Technique | What it does | Effect measured here |
@@ -49,6 +54,35 @@ shot, and qsim's include converting the circuit in Python. qsim's CPU
 backend is single precision only. Amplitudes were checked against Qiskit Aer
 (maximum difference 7×10⁻¹³ in double precision).
 
+### Clifford circuits
+
+Rotated surface code memory experiments (d rounds), 10,000 shots, from the
+same OpenQASM file. qvd on 8 P-cores (single-threaded in brackets); Stim is
+single-threaded. Details are in
+[docs/DESIGN.md](docs/DESIGN.md#7-stabilizer-backend-stabilizer).
+
+| Distance | Qubits | Gates | Measurements | qvd, 8 P-cores (1 thread) | Stim 1.16, reference + `FlipSimulator` | Stim `sample()` | Qiskit Aer 0.17 stabilizer |
+|---|---|---|---|---|---|---|---|
+| 11 | 241 | 6,160 | 1,441 | **0.001 s** (0.003 s) | 0.004 s | 0.11 s | 10.8 s |
+| 21 | 881 | 44,520 | 9,681 | **0.009 s** (0.018 s) | 0.036 s | 0.32 s | 636 s |
+| 51 | 5,201 | 652,800 | 135,201 | **0.15 s** (0.29 s) | 0.45 s | 6.9 s | — |
+| 101 | 20,401 | 5,110,600 | 1,040,401 | **2.8 s** (4.4 s) | 12.4 s | 131 s | — |
+
+These runs shared the machine with a virtual machine using about six cores,
+so absolute times are a little high; all simulators ran under the same
+conditions. Stim's `sample()` returns shot-major arrays and is much slower
+here; its flip simulator returns measurement-major results, as qvd does,
+and is the fairer comparison.
+
+The stabilizer backend runs a Stim-style reference shot on an inverse
+tableau and propagates bit-packed Pauli frames for all other shots. Three
+additions matter at this scale:
+- the tableau switches between row and column layouts depending on whether
+  gates or random measurements dominate;
+- rows keep a bitmap of their nonzero words, so products of the sparse rows
+  of a local code touch a few words instead of 319;
+- frames run in parallel, cache-sized blocks.
+
 ## How many qubits?
 
 A full state of *n* qubits holds 2ⁿ amplitudes: 8 bytes each in single
@@ -65,9 +99,9 @@ or 31 in double**, and that ceiling holds for every simulator. No credible
 source shows a general 40-qubit simulation on one workstation: the records
 (45 qubits in 2017, 50 in 2025) used supercomputers. Larger qubit counts on
 one machine are possible only for circuits with structure: Clifford
-circuits (stabilizer methods reach ~20,000 qubits), low-entanglement
-circuits (matrix product states), or a few amplitudes rather than the whole
-state. Those backends are the next steps on the roadmap.
+circuits (qvd's stabilizer backend handles 20,000 qubits in seconds),
+low-entanglement circuits (matrix product states), or a few amplitudes
+rather than the whole state.
 
 ## Usage
 
@@ -94,7 +128,20 @@ fn main() -> std::io::Result<()> {
 This is `examples/quickstart.rs`. Gates follow Qiskit's definitions and qubit order (qubit 0 is the least
 significant bit), and `Circuit::to_qasm` exports OpenQASM 2.
 
-Threads run on rayon's global pool by default. To choose cores explicitly:
+`run` picks the backend: with the default `Backend::Auto`, circuits made only
+of Clifford gates (including rotations by multiples of π/2), measurements and
+resets run on the stabilizer backend, and everything else on the state
+vector. For many shots or many classical bits, `stabilizer::sample` returns
+bit-packed results without building strings:
+
+```rust
+let circuit = qvd::library::surface_code(25, 25);
+let samples = qvd::stabilizer::sample(&circuit, 100_000, Some(1)).unwrap();
+let first_shot_bit_0 = samples.get(0, 0);
+```
+
+Threads run on rayon's global pool by default. To choose cores explicitly
+(the stabilizer backend is fastest on P-cores only):
 
 ```rust
 use qvd::threads::{pool, Placement};
@@ -113,11 +160,16 @@ cargo run --release --example bandwidth            # memory bandwidth per thread
 cargo run --release --example kernels -- 30 f32    # gate cost vs. one memory sweep
 cargo run --release --example bench -- random 28 20 f32 4 14 --qasm /tmp/c.qasm
 cargo run --release --example shots -- 28 1000000
+cargo run --release --example stabilizer -- surface 101 101 10000 --qasm /tmp/s.qasm
 
 # Compare with Qiskit Aer and qsim on the same circuit:
 python3 -m venv .bench-venv
 .bench-venv/bin/pip install qiskit qiskit-aer qsimcirq cirq-core ply
 .bench-venv/bin/python benchmarks/compare.py /tmp/c.qasm --precision single --threads 32
+
+# Clifford circuits against Stim and Aer's stabilizer method:
+.bench-venv/bin/pip install stim
+.bench-venv/bin/python benchmarks/compare_stim.py /tmp/s.qasm --shots 10000
 ```
 
 `bench` arguments: circuit (`random`, `qft`, `ghz`), qubits, depth,
@@ -126,13 +178,14 @@ off). `QVD_PLACEMENT=pcores|pthreads|allcores|all` selects the threads.
 
 ## Roadmap
 
-1. Stabilizer (Clifford) backend in the style of Stim: bit-packed AVX2
-   tableaux, for thousands of qubits.
-2. Automatic backend selection.
-3. Matrix product state backend for low-entanglement circuits past 32 qubits.
-4. Near-Clifford backend (Clifford frame + small dense state, reusing these
+1. ~~Stabilizer (Clifford) backend~~ (done, with automatic selection of
+   Clifford circuits).
+2. Matrix product state backend for low-entanglement circuits past 32 qubits.
+3. Near-Clifford backend (Clifford frame + small dense state, reusing these
    kernels) and Pauli propagation for expectation values.
-5. OpenQASM input, Python bindings and noise.
+4. Backend selection beyond the Clifford check.
+5. OpenQASM input, Python bindings and noise (Pauli noise channels fit the
+   frame simulator directly).
 
 ## License
 

@@ -62,6 +62,7 @@ fn main() {
         std::fs::write(path, circuit.to_qasm().unwrap()).unwrap();
     }
     let options = Options {
+        backend: qvd::Backend::StateVector,
         max_fused_qubits: fusion,
         seed: None,
         region_bits: (region > 0).then_some(region),

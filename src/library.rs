@@ -100,3 +100,110 @@ pub fn random_gate_circuit(n: usize, gates: usize, seed: u64) -> Circuit {
     }
     c
 }
+
+/// A rotated surface-code memory experiment of distance `d`: `rounds`
+/// rounds of stabilizer measurement (reset ancillas, CNOTs to the
+/// neighbouring data qubits, measure ancillas), then every data qubit is
+/// measured. Data qubits are `0..d*d`; the `d*d - 1` ancillas follow.
+///
+/// This is the kind of circuit stabilizer simulators are built for: about
+/// `2 d^2` qubits, mostly deterministic measurements.
+pub fn surface_code(d: usize, rounds: usize) -> Circuit {
+    assert!(d >= 2);
+    let data = |r: usize, c: usize| r * d + c;
+    // Plaquette (i, j), i, j in 0..=d, touches data (i-1|i, j-1|j). Interior
+    // plaquettes alternate X/Z in a checkerboard; on the top and bottom
+    // boundaries only X plaquettes are kept, on the left and right only Z.
+    let mut plaquettes: Vec<(bool, Vec<Option<usize>>)> = Vec::new();
+    for i in 0..=d {
+        for j in 0..=d {
+            let is_x = (i + j) % 2 == 0;
+            let corner = |di: usize, dj: usize| -> Option<usize> {
+                let (r, c) = ((i + di).checked_sub(1)?, (j + dj).checked_sub(1)?);
+                (r < d && c < d).then(|| data(r, c))
+            };
+            // Neighbours in hook-safe order: NW, NE, SW, SE for X; NW, SW, NE, SE for Z.
+            let order = if is_x {
+                [(0, 0), (0, 1), (1, 0), (1, 1)]
+            } else {
+                [(0, 0), (1, 0), (0, 1), (1, 1)]
+            };
+            let neighbours: Vec<Option<usize>> = order.iter().map(|&(a, b)| corner(a, b)).collect();
+            let weight = neighbours.iter().flatten().count();
+            let on_row_boundary = i == 0 || i == d;
+            let on_col_boundary = j == 0 || j == d;
+            let keep = match weight {
+                4 => true,
+                2 => (on_row_boundary && is_x) || (on_col_boundary && !is_x),
+                _ => false,
+            };
+            if keep {
+                plaquettes.push((is_x, neighbours));
+            }
+        }
+    }
+    let ancilla0 = d * d;
+    let n = ancilla0 + plaquettes.len();
+    let mut c = Circuit::new(n);
+    let mut clbit = 0;
+    for _ in 0..rounds {
+        for a in 0..plaquettes.len() {
+            c.reset(ancilla0 + a);
+        }
+        for (a, (is_x, _)) in plaquettes.iter().enumerate() {
+            if *is_x {
+                c.h(ancilla0 + a);
+            }
+        }
+        for step in 0..4 {
+            for (a, (is_x, neighbours)) in plaquettes.iter().enumerate() {
+                if let Some(q) = neighbours[step] {
+                    if *is_x {
+                        c.cx(ancilla0 + a, q);
+                    } else {
+                        c.cx(q, ancilla0 + a);
+                    }
+                }
+            }
+        }
+        for (a, (is_x, _)) in plaquettes.iter().enumerate() {
+            if *is_x {
+                c.h(ancilla0 + a);
+            }
+        }
+        for a in 0..plaquettes.len() {
+            c.measure(ancilla0 + a, clbit);
+            clbit += 1;
+        }
+    }
+    for q in 0..d * d {
+        c.measure(q, clbit);
+        clbit += 1;
+    }
+    c
+}
+
+/// A random Clifford circuit: `depth` layers of random single-qubit
+/// Cliffords on every qubit and CX on random disjoint pairs.
+pub fn random_clifford(n: usize, depth: usize, seed: u64) -> Circuit {
+    let mut rng = Pcg64::seed_from_u64(seed);
+    let mut c = Circuit::new(n);
+    for _ in 0..depth {
+        for q in 0..n {
+            match rng.random_range(0..3) {
+                0 => c.h(q),
+                1 => c.s(q),
+                _ => c.sx(q),
+            };
+        }
+        let mut order: Vec<usize> = (0..n).collect();
+        for i in (1..n).rev() {
+            let j = rng.random_range(0..=i);
+            order.swap(i, j);
+        }
+        for pair in order.chunks_exact(2) {
+            c.cx(pair[0], pair[1]);
+        }
+    }
+    c
+}

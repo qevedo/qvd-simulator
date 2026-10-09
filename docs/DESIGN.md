@@ -158,7 +158,112 @@ run shot by shot.
   agree to 7×10⁻¹³ and 8×10⁻¹⁴ in double precision, including the global
   phase, so gate conventions match Qiskit's exactly.
 
-## 7. Not done yet
+## 7. Stabilizer backend (`stabilizer/`)
+
+Circuits of Clifford gates (H, S, CX, CZ, Paulis, SWAP, √X, and rotations
+by multiples of π/2), measurements and resets keep the state a stabilizer
+state, which `O(n²)` bits describe exactly. `Backend::Auto` sends such
+circuits here (`stabilizer::lower` decides, gate by gate); `stabilizer::sample`
+returns bit-packed shots, 64 per word.
+
+**Two passes, as in Stim.** One *reference* shot runs on a stabilizer
+tableau and records an outcome for every measurement. All other shots are
+Pauli *frames* relative to it: `x`/`z` bits per qubit, 64 shots per word,
+pushed through the gates with a few XORs. A frame's X component flips a
+measurement; its Z component is randomised at the start and after each
+measurement and reset, which makes exactly the random measurements come out
+random (Gidney, *Quantum* 5, 497, 2021).
+
+**Inverse tableau (`tableau.rs`).** For each generator `g` among
+`X_0…X_{n-1}, Z_0…Z_{n-1}` the tableau stores `C† g C` as `x`/`z` bit rows
+plus a sign. A gate is a product of two rows, with the phase accumulated
+bit-sliced over 64 qubits at a time. A Z measurement is deterministic when
+row `Z_q` has no X bits, and its sign is then the outcome. Otherwise one of
+two collapse methods runs. In the row layout, every row is conjugated by a
+closed-form layer of CX/CZ gates. In the column layout, Stim's method
+prepends CX gates, then H, then X: each is a column operation.
+
+**What made the d = 101 surface code fast.** The benchmark is a
+rotated surface code of distance 101 (20,401 qubits, 101 rounds:
+5,110,600 gates and 1,040,401 measurements), sampled 10,000 times. The
+first version of the generator measured each ancilla straight after its
+closing H (`h a; measure a; h b; measure b; …`), which is the hard case
+for every layout policy:
+
+| Step | Time |
+|---|---|
+| Row-major tableau, collapse = a pass over all 40,802 rows | 37.3 s (with 64 shots) |
+| Transpose to columns for runs of random measurements | 19.0 s |
+| Cache the x bits of 64 rows while in columns | 16.6 s |
+| Gates in the column layout as sparse row updates; adaptive layout switching | 11.2 s |
+| Per-row bitmap of nonzero words: row products touch only those | 4.3 s |
+| Frames in parallel blocks on the P-cores | 3.5 s |
+| Generator emits the H layer, then the measurement layer | **2.4 s** |
+
+The steps, in order:
+
+- **Columns for collapses.** Each random measurement in the row layout
+  touches a few words of every one of the `2n` rows, which is a strided
+  pass over 208 MB. Transposing once (64×64 bit-block transposes, in
+  parallel) turns the collapses into column operations of `O(n/64)` words
+  each.
+- **Row cache.** Locating a row's X bits in the column layout reads one
+  word per column. A transposed copy of the x bits of the current 64-row
+  group, patched after each column operation, serves a run of consecutive
+  measurements instead.
+- **Adaptive layout.** Interleaved H gates forced a transposition back to
+  rows before every gate. Now a gate in the column layout gathers its two
+  rows and flips only the bits that change. A running balance of what the
+  other layout would have saved triggers a transposition once it exceeds
+  the transposition's cost. Measurement-heavy stretches stay in columns and
+  gate-heavy ones go back to rows. `Layout::Rows` and `Layout::Columns`
+  force one layout (the tests run all three).
+- **Sparse rows.** In a code with local checks, inverse-tableau rows have
+  weight `O(d)`: about 2 nonzero words out of 319. Each row keeps a bitmap
+  of its nonzero words, so a row product reads and writes only the source
+  row's nonzero words, and a row-layout collapse skips rows that are zero
+  on the words it changes. Dense rows fall back to the vectorised loop.
+- **Parallel frames.** The reference pass records the circuit as steps.
+  Frame blocks of up to 2,048 shots then walk the steps in parallel, in
+  32k-step segments so that the step list stays in cache. Each block's
+  frames fit in L2. The blocks synchronise after each segment, so a pool
+  of P-cores is faster than all 32 threads (frames 1.0 s vs 3.8 s at
+  d = 101). Each 64-shot word has its own random stream, which makes
+  results depend only on the seed and not on the thread count.
+
+**Against Stim and Qiskit Aer.** Same OpenQASM circuits (layered
+generator), 10,000 shots, timed by `benchmarks/compare_stim.py`. Stim 1.16
+is single-threaded; qvd is shown on 8 P-cores and on one thread. Stim is
+timed two ways: `reference_sample()` plus a `FlipSimulator` with
+measurement-major output (the fair comparison), and
+`compile_sampler().sample(bit_packed=True)`.
+
+| Distance | Qubits | Gates | Measurements | qvd, 8 P-cores (1 thread) | Stim 1.16, reference + `FlipSimulator` | Stim `sample()` | Qiskit Aer 0.17 stabilizer |
+|---|---|---|---|---|---|---|---|
+| 11 | 241 | 6,160 | 1,441 | **0.001 s** (0.003 s) | 0.004 s | 0.11 s | 10.8 s |
+| 21 | 881 | 44,520 | 9,681 | **0.009 s** (0.018 s) | 0.036 s | 0.32 s | 636 s |
+| 51 | 5,201 | 652,800 | 135,201 | **0.15 s** (0.29 s) | 0.45 s | 6.9 s | — |
+| 101 | 20,401 | 5,110,600 | 1,040,401 | **2.8 s** (4.4 s) | 12.4 s | 131 s | — |
+
+These runs shared the machine with a virtual machine using about six cores
+(the step table above was measured on a quiet machine, hence 2.4 s there and
+2.8 s here); all simulators ran under the same conditions. At d = 51 Stim
+spends 0.17 s on its reference shot and the rest in frames; at d = 101 its
+reference shot alone takes 8.0 s, against about 2 s for qvd's sparse rows.
+`sample()`, which returns shot-major bits, is 9–27× slower than Stim's flip
+simulator here. Single-threaded, qvd is 1.3–2.8× faster
+than Stim; with 8 P-cores it is 3–4.5× faster.
+
+**Correctness** (`tests/stabilizer.rs`): expectation values of random Pauli
+strings and deterministic measurement outcomes against the dense simulator
+on random Clifford circuits. Forced collapse outcomes are checked against
+dense projection under every layout policy, including frequent switching.
+Sampled distributions are checked against exact branching distributions
+(5σ). Further tests cover 1,000-qubit GHZ sampling, the surface code's
+stabilizers repeating from round to round (d = 3, 5, 7), reproducibility
+across thread counts, and 64×64 transposes.
+
+## 8. Not done yet
 
 - **Calibration.** Fusion width (4) and region size (2^14 blocks) are fixed
   defaults chosen from the measurements above. A per-machine calibration
@@ -166,9 +271,15 @@ run shot by shot.
   them.
 - **Smarter stage planning.** The lookahead is greedy; Atlas finds a
   minimal number of stages with an ILP.
-- **Other backends.** Stabilizer, MPS, near-Clifford and Pauli propagation
-  backends, and automatic selection between them, are the roadmap in the
-  README. They are what takes structured circuits past the 32-qubit wall.
+- **Other backends.** MPS, near-Clifford and Pauli propagation backends,
+  and selection between them beyond the Clifford check, are the roadmap in
+  the README. With the stabilizer backend, they are what takes structured
+  circuits past the 32-qubit wall.
+- **Stabilizer reference pass in parallel.** The reference shot is
+  sequential and is most of the time at d = 101 (about 2.2 s; its gates are
+  cache misses in a 208 MB tableau). Gates on disjoint qubits touch
+  disjoint rows and could run in parallel, and storing each row's x and z
+  words side by side would halve the misses.
 - **Encoded or out-of-core states.** A 2-byte encoding would reach 34
   qubits here at some precision cost; SSD-backed states need a dedicated
   multi-terabyte NVMe array to be practical.

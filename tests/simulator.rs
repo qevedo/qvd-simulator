@@ -12,6 +12,7 @@ fn circuits_match_reference_for_every_fusion_width() {
         let expected = reference::statevector(&circuit);
         for max_fused_qubits in 1..=6 {
             let options = Options {
+                backend: qvd::Backend::StateVector,
                 max_fused_qubits,
                 seed: None,
                 region_bits: None,
@@ -170,6 +171,7 @@ fn cache_blocking_matches_reference() {
         for region_bits in 1..=4 {
             for max_fused_qubits in [1, 3, 4] {
                 let options = Options {
+                    backend: qvd::Backend::StateVector,
                     max_fused_qubits,
                     seed: None,
                     region_bits: Some(region_bits),

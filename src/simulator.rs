@@ -12,9 +12,24 @@ use crate::fusion::{Op, fuse};
 use crate::simd::Real;
 use crate::state::StateVector;
 
+/// Which simulation method [`run`] uses.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Backend {
+    /// The stabilizer backend for Clifford circuits, otherwise the state
+    /// vector.
+    #[default]
+    Auto,
+    /// Dense state vector: any circuit, up to ~32 qubits.
+    StateVector,
+    /// Stabilizer tableau and Pauli frames: Clifford circuits only, any size.
+    Stabilizer,
+}
+
 /// Simulator settings.
 #[derive(Clone, Debug)]
 pub struct Options {
+    /// Simulation method for [`run`].
+    pub backend: Backend,
     /// Largest fused gate, in qubits. 1 disables fusion. On AVX2 machines a
     /// fused gate on up to 4 qubits costs about one memory sweep.
     pub max_fused_qubits: usize,
@@ -28,6 +43,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Options {
         Options {
+            backend: Backend::Auto,
             max_fused_qubits: 4,
             seed: None,
             region_bits: Some(DEFAULT_REGION_BITS),
@@ -160,7 +176,7 @@ fn count_outcomes(
         }
         return counts;
     }
-    let mut keys: Vec<u128> = outcomes
+    let keys: Vec<u128> = outcomes
         .par_iter()
         .map(|&index| {
             measures.iter().fold(0u128, |key, &(q, c)| {
@@ -168,6 +184,14 @@ fn count_outcomes(
             })
         })
         .collect();
+    counts_from_keys(keys, num_clbits)
+}
+
+/// Counts from per-shot integer keys (bit `c` = classical bit `c`): sort in
+/// parallel, count runs, and format only the distinct keys.
+pub(crate) fn counts_from_keys(mut keys: Vec<u128>, num_clbits: usize) -> BTreeMap<String, usize> {
+    use rayon::prelude::*;
+    let mut counts = BTreeMap::new();
     keys.par_sort_unstable();
     let mut start = 0;
     while start < keys.len() {
@@ -190,13 +214,24 @@ fn bitstring(clbits: &[bool]) -> String {
 
 /// Run `circuit` for `shots` shots and count the classical outcomes.
 ///
-/// Circuits whose measurements all come at the end are simulated once and
-/// sampled. Mid-circuit measurements and resets are simulated shot by shot.
+/// With [`Backend::Auto`], Clifford circuits go to the stabilizer backend
+/// (any number of qubits) and others to the state vector with precision
+/// `T`. On the state vector, circuits whose measurements all come at the
+/// end are simulated once and sampled; mid-circuit measurements and resets
+/// are simulated shot by shot.
 pub fn run<T: Real>(
     circuit: &Circuit,
     shots: usize,
     options: &Options,
 ) -> std::io::Result<RunResult> {
+    let stabilizer = match options.backend {
+        Backend::Stabilizer => true,
+        Backend::StateVector => false,
+        Backend::Auto => crate::stabilizer::is_clifford(circuit),
+    };
+    if stabilizer {
+        return crate::stabilizer::run(circuit, shots, options.seed).map_err(std::io::Error::other);
+    }
     let mut rng = match options.seed {
         Some(seed) => Pcg64::seed_from_u64(seed),
         None => Pcg64::from_rng(&mut rand::rng()),

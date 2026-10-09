@@ -351,7 +351,9 @@ impl Circuit {
                         CCX => ("ccx", vec![]),
                         CSWAP => ("cswap", vec![]),
                         Unitary(_) => {
-                            return Err("arbitrary unitaries cannot be written as OpenQASM 2".into());
+                            return Err(
+                                "arbitrary unitaries cannot be written as OpenQASM 2".into()
+                            );
                         }
                     };
                     let params = if params.is_empty() {

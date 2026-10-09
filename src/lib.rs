@@ -16,10 +16,11 @@ pub mod memory;
 pub mod reference;
 pub mod simd;
 pub mod simulator;
+pub mod stabilizer;
 pub mod state;
 pub mod threads;
 
 pub use circuit::{Circuit, Gate, Instruction};
 pub use matrix::{C64, Matrix};
-pub use simulator::{Options, RunResult, Stats, run, statevector};
+pub use simulator::{Backend, Options, RunResult, Stats, run, statevector};
 pub use state::StateVector;
