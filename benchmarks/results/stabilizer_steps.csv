@@ -1,0 +1,8 @@
+step,description,seconds,shots
+1,"Row-major tableau, collapse = a pass over all rows",37.3,64
+2,"Transpose to columns for runs of random measurements",19.0,10000
+3,"Cache the x bits of 64 rows while in columns",16.6,10000
+4,"Gates in the column layout as sparse row updates; adaptive switching",11.2,10000
+5,"Per-row bitmap of nonzero words",4.3,10000
+6,"Frames in parallel blocks on the P-cores",3.5,10000
+7,"Generator emits the H layer, then the measurement layer",2.4,10000

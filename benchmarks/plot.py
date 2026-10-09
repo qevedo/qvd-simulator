@@ -1,0 +1,139 @@
+"""Draw the charts in benchmarks/charts/ from the CSV files in benchmarks/results/.
+
+    python benchmarks/plot.py
+
+Needs matplotlib. The SVGs are deterministic, so regenerating them without
+changing the data leaves git clean.
+"""
+
+import csv
+from collections import defaultdict
+from pathlib import Path
+
+import matplotlib
+
+matplotlib.use("svg")
+import matplotlib.pyplot as plt  # noqa: E402
+
+HERE = Path(__file__).resolve().parent
+RESULTS = HERE / "results"
+CHARTS = HERE / "charts"
+
+plt.rcParams.update({
+    "svg.hashsalt": "qvd",
+    "svg.fonttype": "path",
+    "font.family": "sans-serif",
+    "font.size": 10,
+    "axes.spines.top": False,
+    "axes.spines.right": False,
+    "figure.facecolor": "white",
+    "axes.facecolor": "white",
+})
+
+COLORS = {
+    "qvd": "#d1495b",
+    "qvd, 1 thread": "#f4a4ae",
+    "qsim": "#00798c",
+    "qiskit-aer": "#edae49",
+    "stim, flip simulator": "#30638e",
+    "stim, sample()": "#8fb8de",
+    "qiskit-aer, stabilizer": "#edae49",
+}
+
+
+def read(name):
+    with open(RESULTS / name, newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def save(fig, name):
+    CHARTS.mkdir(exist_ok=True)
+    fig.savefig(CHARTS / name, metadata={"Date": None}, bbox_inches="tight")
+    plt.close(fig)
+
+
+def statevector():
+    rows = read("statevector.csv")
+    cases = []
+    times = defaultdict(dict)
+    for r in rows:
+        case = (r["circuit"], int(r["qubits"]), r["precision"])
+        if case not in cases:
+            cases.append(case)
+        times[r["simulator"]][case] = float(r["seconds"])
+    simulators = ["qvd", "qsim", "qiskit-aer"]
+    width = 0.27
+    fig, ax = plt.subplots(figsize=(11, 4.4))
+    for i, sim in enumerate(simulators):
+        xs = [c + (i - 1) * width for c, case in enumerate(cases) if case in times[sim]]
+        ys = [times[sim][case] for case in cases if case in times[sim]]
+        bars = ax.bar(xs, ys, width, label=sim, color=COLORS[sim])
+        if sim == "qvd":
+            ax.bar_label(bars, labels=[f"{y:g}" for y in ys], fontsize=8, padding=2)
+    ax.set_yscale("log")
+    ax.set_ylabel("seconds (log scale, lower is better)")
+    ax.set_xticks(range(len(cases)))
+    names = {"random": "Random", "qft": "QFT"}
+    ax.set_xticklabels([f"{names[c]}\n{q} qubits\n{p}" for c, q, p in cases], fontsize=9)
+    ax.set_title("State-vector simulation, i9-14900K (qsim's CPU backend is single precision only)")
+    ax.legend(frameon=False, ncols=3, loc="upper left")
+    save(fig, "statevector.svg")
+
+
+def stabilizer():
+    rows = read("stabilizer.csv")
+    series = defaultdict(list)
+    for r in rows:
+        if r["simulator"] == "qvd":
+            name = "qvd" if r["threads"] != "1" else "qvd, 1 thread"
+        elif r["simulator"] == "stim":
+            name = "stim, flip simulator" if "Flip" in r["method"] else "stim, sample()"
+        else:
+            name = "qiskit-aer, stabilizer"
+        series[name].append((int(r["qubits"]), float(r["seconds"]), int(r["distance"])))
+    fig, ax = plt.subplots(figsize=(7.5, 4.6))
+    labels = {
+        "qvd": "qvd, 8 P-cores",
+        "qvd, 1 thread": "qvd, 1 thread",
+        "stim, flip simulator": "Stim, reference + FlipSimulator",
+        "stim, sample()": "Stim, compile_sampler().sample()",
+        "qiskit-aer, stabilizer": "Qiskit Aer, stabilizer",
+    }
+    for name, label in labels.items():
+        points = sorted(series[name])
+        style = "-" if name.startswith("qvd") else "--"
+        ax.plot([p[0] for p in points], [p[1] for p in points], style, marker="o",
+                color=COLORS[name], label=label, linewidth=2 if name == "qvd" else 1.5)
+    distances = sorted({(q, d) for pts in series.values() for q, _, d in pts})
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xticks([q for q, _ in distances])
+    ax.set_xticklabels([f"{q:,}\nd={d}" for q, d in distances])
+    ax.minorticks_off()
+    ax.set_xlabel("qubits (rotated surface code, d rounds)")
+    ax.set_ylabel("seconds for 10,000 shots (log scale)")
+    ax.set_title("Clifford circuits: surface code sampling")
+    ax.legend(frameon=False, loc="center left", bbox_to_anchor=(1.01, 0.5))
+    save(fig, "stabilizer.svg")
+
+
+def stabilizer_steps():
+    rows = read("stabilizer_steps.csv")
+    fig, ax = plt.subplots(figsize=(8, 3.6))
+    labels = [r["description"] + (f" ({r['shots']} shots)" if r["shots"] != "10000" else "") for r in rows]
+    values = [float(r["seconds"]) for r in rows]
+    bars = ax.barh(range(len(rows)), values, color=COLORS["qvd"])
+    ax.bar_label(bars, labels=[f"{v:g} s" for v in values], padding=3, fontsize=9)
+    ax.set_yticks(range(len(rows)))
+    ax.set_yticklabels(labels, fontsize=9)
+    ax.invert_yaxis()
+    ax.set_xlabel("seconds, distance-101 surface code (20,401 qubits, 101 rounds, 10k shots)")
+    ax.set_title("What made the stabilizer backend fast (each step adds to the previous)")
+    save(fig, "stabilizer_steps.svg")
+
+
+if __name__ == "__main__":
+    statevector()
+    stabilizer()
+    stabilizer_steps()
+    print(f"wrote {', '.join(p.name for p in sorted(CHARTS.glob('*.svg')))}")

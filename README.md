@@ -32,6 +32,14 @@ explains how each finding maps to the code and what was measured.
 
 ## Results
 
+The recorded data (CSV), the scripts that produced it and the charts are in
+[`benchmarks/`](benchmarks/), with the full method in
+[benchmarks/README.md](benchmarks/README.md).
+
+### State-vector simulation
+
+![State-vector benchmark: qvd vs qsim vs Qiskit Aer](benchmarks/charts/statevector.svg)
+
 Same OpenQASM circuits, same machine, best of 16 or 32 threads for each
 simulator. Random circuits are depth-20 Google-style circuits (√X, √Y, √W
 on every qubit and CZ on a brick pattern); QFT is the quantum Fourier
@@ -55,6 +63,8 @@ backend is single precision only. Amplitudes were checked against Qiskit Aer
 (maximum difference 7×10⁻¹³ in double precision).
 
 ### Clifford circuits
+
+![Stabilizer benchmark: qvd vs Stim vs Qiskit Aer](benchmarks/charts/stabilizer.svg)
 
 Rotated surface code memory experiments (d rounds), 10,000 shots, from the
 same OpenQASM file. qvd on 8 P-cores (single-threaded in brackets); Stim is
@@ -164,12 +174,14 @@ cargo run --release --example stabilizer -- surface 101 101 10000 --qasm /tmp/s.
 
 # Compare with Qiskit Aer and qsim on the same circuit:
 python3 -m venv .bench-venv
-.bench-venv/bin/pip install qiskit qiskit-aer qsimcirq cirq-core ply
+.bench-venv/bin/pip install qiskit qiskit-aer qsimcirq cirq-core ply stim matplotlib
 .bench-venv/bin/python benchmarks/compare.py /tmp/c.qasm --precision single --threads 32
 
 # Clifford circuits against Stim and Aer's stabilizer method:
-.bench-venv/bin/pip install stim
 .bench-venv/bin/python benchmarks/compare_stim.py /tmp/s.qasm --shots 10000
+
+# Redraw benchmarks/charts/ from benchmarks/results/*.csv:
+.bench-venv/bin/python benchmarks/plot.py
 ```
 
 `bench` arguments: circuit (`random`, `qft`, `ghz`), qubits, depth,

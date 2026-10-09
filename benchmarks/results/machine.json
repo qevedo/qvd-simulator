@@ -1,0 +1,19 @@
+{
+  "date": "2026-10-09",
+  "cpu": "Intel Core i9-14900K (8 P-cores with hyper-threading + 16 E-cores, 32 threads, AVX2 + FMA, no AVX-512)",
+  "memory": "62 GB DDR5",
+  "os": "Linux 7.0.0",
+  "rustc": "1.96.0",
+  "python_packages": {
+    "qiskit": "2.5.2",
+    "qiskit-aer": "0.17.2",
+    "qsimcirq": "0.22.1",
+    "cirq-core": "1.7.0",
+    "stim": "1.16.0"
+  },
+  "notes": [
+    "statevector.csv: best of 16 or 32 threads for each simulator; qvd includes allocating the state, the others include sampling one shot, and qsim includes converting the circuit in Python.",
+    "stabilizer.csv: rotated surface code memory experiments with d rounds; qvd on a pool of 8 P-cores or 1 thread; Stim is single-threaded. A virtual machine used about six cores during these runs, for every simulator alike.",
+    "stabilizer_steps.csv: distance-101 surface code, 101 rounds, on a quiet machine; steps 1-6 used a generator that measured each ancilla right after its closing H."
+  ]
+}
