@@ -25,8 +25,9 @@ unsafe impl<T: Copy + Send + Sync> Send for Buffer<T> {}
 unsafe impl<T: Copy + Send + Sync> Sync for Buffer<T> {}
 
 impl<T: Copy + Send + Sync> Buffer<T> {
-    /// Map `len` zeroed elements, aligned to [`HUGE_PAGE`], and fault the pages
-    /// in from the current rayon pool so they are spread over its threads.
+    /// Allocate `len` zeroed elements, aligned to [`HUGE_PAGE`], and fault the
+    /// pages in from the current rayon pool so they are spread over its
+    /// threads.
     ///
     /// `T` must be a type for which all-zero bytes is a valid value (floats,
     /// integers and arrays of them).
@@ -35,44 +36,9 @@ impl<T: Copy + Send + Sync> Buffer<T> {
             .checked_mul(size_of::<T>())
             .ok_or_else(|| std::io::Error::other("buffer size overflows usize"))?;
         let mapped_bytes = bytes.max(1).div_ceil(HUGE_PAGE) * HUGE_PAGE;
-        // Over-allocate by one huge page so the start can be aligned to 2 MiB;
-        // mmap only guarantees 4 KiB alignment.
-        let request = mapped_bytes + HUGE_PAGE;
-        // SAFETY: anonymous private mapping with no address hint.
-        let raw = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                request,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
-                -1,
-                0,
-            )
-        };
-        if raw == libc::MAP_FAILED {
-            return Err(std::io::Error::last_os_error());
-        }
-        let start = raw as usize;
-        let aligned = start.next_multiple_of(HUGE_PAGE);
-        // Return the unaligned head and the unused tail to the kernel.
-        // SAFETY: both ranges lie inside the mapping created above.
-        unsafe {
-            if aligned > start {
-                libc::munmap(raw, aligned - start);
-            }
-            let tail = start + request - (aligned + mapped_bytes);
-            if tail > 0 {
-                libc::munmap((aligned + mapped_bytes) as *mut libc::c_void, tail);
-            }
-            // Advice only: failure (e.g. THP disabled) is harmless.
-            libc::madvise(
-                aligned as *mut libc::c_void,
-                mapped_bytes,
-                libc::MADV_HUGEPAGE,
-            );
-        }
+        let aligned = allocate(mapped_bytes)?;
         let buffer = Buffer {
-            ptr: NonNull::new(aligned as *mut T).expect("mmap returned null"),
+            ptr: NonNull::new(aligned as *mut T).expect("allocation returned null"),
             len,
             mapped_bytes,
         };
@@ -124,7 +90,92 @@ impl<T: Copy + Send + Sync> Buffer<T> {
 
 impl<T: Copy + Send + Sync> Drop for Buffer<T> {
     fn drop(&mut self) {
-        // SAFETY: unmapping exactly the aligned range we kept.
-        unsafe { libc::munmap(self.ptr.as_ptr() as *mut libc::c_void, self.mapped_bytes) };
+        // SAFETY: releasing exactly the range `allocate` returned.
+        unsafe { release(self.ptr.as_ptr() as *mut u8, self.mapped_bytes) };
     }
+}
+
+/// `bytes` (a multiple of [`HUGE_PAGE`]) of zeroed memory aligned to
+/// [`HUGE_PAGE`]: an anonymous mapping on Unix, with transparent huge pages
+/// requested on Linux.
+#[cfg(unix)]
+fn allocate(bytes: usize) -> std::io::Result<*mut u8> {
+    // Over-allocate by one huge page so the start can be aligned to 2 MiB;
+    // mmap only guarantees 4 KiB alignment.
+    let request = bytes + HUGE_PAGE;
+    #[cfg(target_os = "linux")]
+    let flags = libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE;
+    #[cfg(not(target_os = "linux"))]
+    let flags = libc::MAP_PRIVATE | libc::MAP_ANONYMOUS;
+    // SAFETY: anonymous private mapping with no address hint.
+    let raw = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            request,
+            libc::PROT_READ | libc::PROT_WRITE,
+            flags,
+            -1,
+            0,
+        )
+    };
+    if raw == libc::MAP_FAILED {
+        return Err(std::io::Error::last_os_error());
+    }
+    let start = raw as usize;
+    let aligned = start.next_multiple_of(HUGE_PAGE);
+    // Return the unaligned head and the unused tail to the kernel.
+    // SAFETY: both ranges lie inside the mapping created above.
+    unsafe {
+        if aligned > start {
+            libc::munmap(raw, aligned - start);
+        }
+        let tail = start + request - (aligned + bytes);
+        if tail > 0 {
+            libc::munmap((aligned + bytes) as *mut libc::c_void, tail);
+        }
+        // Advice only: failure (e.g. THP disabled) is harmless.
+        #[cfg(target_os = "linux")]
+        libc::madvise(aligned as *mut libc::c_void, bytes, libc::MADV_HUGEPAGE);
+    }
+    Ok(aligned as *mut u8)
+}
+
+/// Release memory from [`allocate`].
+///
+/// # Safety
+/// `ptr` and `bytes` must come from one call to `allocate`.
+#[cfg(unix)]
+unsafe fn release(ptr: *mut u8, bytes: usize) {
+    // SAFETY: the caller passes exactly the range `allocate` kept.
+    unsafe { libc::munmap(ptr as *mut libc::c_void, bytes) };
+}
+
+#[cfg(not(unix))]
+fn layout(bytes: usize) -> std::alloc::Layout {
+    std::alloc::Layout::from_size_align(bytes, HUGE_PAGE).expect("valid layout")
+}
+
+/// `bytes` of zeroed memory aligned to [`HUGE_PAGE`], from the global
+/// allocator (systems without `mmap`).
+#[cfg(not(unix))]
+fn allocate(bytes: usize) -> std::io::Result<*mut u8> {
+    // SAFETY: the layout has a nonzero size.
+    let ptr = unsafe { std::alloc::alloc_zeroed(layout(bytes)) };
+    if ptr.is_null() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::OutOfMemory,
+            "out of memory",
+        ));
+    }
+    Ok(ptr)
+}
+
+/// Release memory from [`allocate`].
+///
+/// # Safety
+/// `ptr` and `bytes` must come from one call to `allocate`.
+#[cfg(not(unix))]
+unsafe fn release(ptr: *mut u8, bytes: usize) {
+    // SAFETY: allocated with the same layout.
+    unsafe { std::alloc::dealloc(ptr, layout(bytes)) };
 }

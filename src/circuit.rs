@@ -50,6 +50,44 @@ pub enum Gate {
 }
 
 impl Gate {
+    /// The gate's name in OpenQASM 2's `qelib1.inc` and its parameters, or
+    /// `None` for [`Gate::Unitary`].
+    pub fn qasm_name(&self) -> Option<(&'static str, Vec<f64>)> {
+        use Gate::*;
+        Some(match *self {
+            I => ("id", vec![]),
+            H => ("h", vec![]),
+            X => ("x", vec![]),
+            Y => ("y", vec![]),
+            Z => ("z", vec![]),
+            S => ("s", vec![]),
+            Sdg => ("sdg", vec![]),
+            T => ("t", vec![]),
+            Tdg => ("tdg", vec![]),
+            SX => ("sx", vec![]),
+            SXdg => ("sxdg", vec![]),
+            RX(t) => ("rx", vec![t]),
+            RY(t) => ("ry", vec![t]),
+            RZ(t) => ("rz", vec![t]),
+            P(l) => ("u1", vec![l]),
+            U(a, b, c) => ("u3", vec![a, b, c]),
+            CX => ("cx", vec![]),
+            CY => ("cy", vec![]),
+            CZ => ("cz", vec![]),
+            CH => ("ch", vec![]),
+            CP(l) => ("cu1", vec![l]),
+            CRX(t) => ("crx", vec![t]),
+            CRY(t) => ("cry", vec![t]),
+            CRZ(t) => ("crz", vec![t]),
+            SWAP => ("swap", vec![]),
+            RZZ(t) => ("rzz", vec![t]),
+            RXX(t) => ("rxx", vec![t]),
+            CCX => ("ccx", vec![]),
+            CSWAP => ("cswap", vec![]),
+            Unitary(_) => return None,
+        })
+    }
+
     /// Number of qubits the gate acts on.
     pub fn arity(&self) -> usize {
         use Gate::*;
@@ -319,43 +357,9 @@ impl Circuit {
         for instruction in &self.instructions {
             match instruction {
                 Instruction::Gate { gate, qubits } => {
-                    use Gate::*;
-                    let (name, params): (&str, Vec<f64>) = match gate {
-                        I => ("id", vec![]),
-                        H => ("h", vec![]),
-                        X => ("x", vec![]),
-                        Y => ("y", vec![]),
-                        Z => ("z", vec![]),
-                        S => ("s", vec![]),
-                        Sdg => ("sdg", vec![]),
-                        T => ("t", vec![]),
-                        Tdg => ("tdg", vec![]),
-                        SX => ("sx", vec![]),
-                        SXdg => ("sxdg", vec![]),
-                        RX(t) => ("rx", vec![*t]),
-                        RY(t) => ("ry", vec![*t]),
-                        RZ(t) => ("rz", vec![*t]),
-                        P(l) => ("u1", vec![*l]),
-                        U(a, b, c) => ("u3", vec![*a, *b, *c]),
-                        CX => ("cx", vec![]),
-                        CY => ("cy", vec![]),
-                        CZ => ("cz", vec![]),
-                        CH => ("ch", vec![]),
-                        CP(l) => ("cu1", vec![*l]),
-                        CRX(t) => ("crx", vec![*t]),
-                        CRY(t) => ("cry", vec![*t]),
-                        CRZ(t) => ("crz", vec![*t]),
-                        SWAP => ("swap", vec![]),
-                        RZZ(t) => ("rzz", vec![*t]),
-                        RXX(t) => ("rxx", vec![*t]),
-                        CCX => ("ccx", vec![]),
-                        CSWAP => ("cswap", vec![]),
-                        Unitary(_) => {
-                            return Err(
-                                "arbitrary unitaries cannot be written as OpenQASM 2".into()
-                            );
-                        }
-                    };
+                    let (name, params) = gate
+                        .qasm_name()
+                        .ok_or("arbitrary unitaries cannot be written as OpenQASM 2")?;
                     let params = if params.is_empty() {
                         String::new()
                     } else {

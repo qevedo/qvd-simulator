@@ -1,0 +1,35 @@
+[build-system]
+requires = ["maturin>=1.15,<2"]
+build-backend = "maturin"
+
+[project]
+name = "qevedo-simulator"
+dynamic = ["version"]
+description = "qvd, a fast quantum circuit simulator: AVX2 state vector, stabilizer, MPS and near-Clifford backends (qevedo.simulator)"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+keywords = ["quantum", "simulator", "quantum-computing", "statevector", "stabilizer"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+
+[project.optional-dependencies]
+numpy = ["numpy>=1.24"]
+test = ["pytest>=7", "numpy>=1.24"]
+
+[project.urls]
+Homepage = "https://github.com/qevedo/qvd-simulator"
+Repository = "https://github.com/qevedo/qvd-simulator"
+
+[tool.maturin]
+# `qevedo` is a namespace package shared with qevedo-compiler: no
+# qevedo/__init__.py here.
+python-source = "python"
+module-name = "qevedo.simulator._native"
+features = ["pyo3/extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

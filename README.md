@@ -196,6 +196,27 @@ amplitudes rather than the whole state.
 
 ## Usage
 
+### From Python
+
+```bash
+pip install qevedo-simulator        # imports as qevedo.simulator
+```
+
+```python
+from qevedo.simulator import Circuit, run, statevector
+
+result = run(Circuit(2).h(0).cx(0, 1).measure_all(), shots=1000)
+print(result.counts, result.backend)   # backend chosen automatically
+
+run(open("circuit.qasm").read(), shots=1000)   # OpenQASM 2 or 3 text
+state = statevector(Circuit(3).h(0).cx(0, 1))  # NumPy array if installed
+```
+
+See [python/README.md](python/README.md). The bindings are a PyO3 module
+built with maturin; simulations release the GIL.
+
+### From Rust
+
 ```rust
 use qvd::{run, statevector, Circuit, Options};
 
@@ -217,7 +238,18 @@ fn main() -> std::io::Result<()> {
 ```
 
 This is `examples/quickstart.rs`. Gates follow Qiskit's definitions and qubit order (qubit 0 is the least
-significant bit), and `Circuit::to_qasm` exports OpenQASM 2.
+significant bit). `Circuit::to_qasm` exports OpenQASM 2, and `qvd::qasm::parse`
+reads OpenQASM 2 and 3:
+- **Gates:** the gates of `qelib1.inc` and `stdgates.inc`, gate definitions
+  and parameter expressions.
+- **Operations:** register broadcasting and ranges, measure, reset and
+  barrier.
+- **Modifiers:** OpenQASM 3's `inv @`, `ctrl @`, `negctrl @` and integer
+  `pow @`.
+
+Programs that need classical state (`if`, loops, variables) are rejected
+with the line and column of the statement. The Python tests check it
+against Qiskit on 40 random circuits exported both ways.
 
 `run` picks the backend: with the default `Backend::Auto`, circuits made only
 of Clifford gates (including rotations by multiples of π/2), measurements and
@@ -247,6 +279,20 @@ pool(&Placement::AllThreads).install(|| { /* simulate */ });
 ```
 
 ## Building and benchmarking
+
+The Python package lives in `python/`:
+
+```sh
+cd python
+pip install "maturin==1.15.0"
+maturin develop --release          # into the active virtualenv
+pip install pytest numpy && pytest
+```
+
+Pushing a tag `vX.Y.Z` that matches `python/Cargo.toml` builds wheels for
+Linux, macOS and Windows and publishes them to PyPI
+(`.github/workflows/release.yml`). x86-64 wheels target `x86-64-v3` (AVX2 +
+FMA) for the AVX2 kernels.
 
 Requires Rust 1.87 or newer. `.cargo/config.toml` builds with
 `-C target-cpu=native` so the AVX2 kernels are used; without AVX2 + FMA a
@@ -294,8 +340,10 @@ off). `QVD_PLACEMENT=pcores|pthreads|allcores|all` selects the threads.
    cheaper than the state vector).
 4. Pauli propagation for expectation values, and a backend selector
    calibrated by benchmarks on this machine.
-5. OpenQASM input, Python bindings and noise (Pauli noise channels fit the
-   frame simulator directly).
+5. ~~OpenQASM input and Python bindings~~ (done: `qvd::qasm`, and the
+   `qevedo-simulator` package in `python/`, imported as `qevedo.simulator`).
+6. Noise: Pauli noise channels fit the stabilizer and near-Clifford frame
+   samplers directly.
 
 ## License
 

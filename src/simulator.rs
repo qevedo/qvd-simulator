@@ -88,6 +88,8 @@ pub struct Stats {
     /// Near-Clifford: the largest number of active qubits (the dense part's
     /// size is two to that power).
     pub peak_active_qubits: Option<usize>,
+    /// The simulation method that ran (what [`Backend::Auto`] chose).
+    pub backend: Option<Backend>,
 }
 
 /// The result of running a circuit with shots.
@@ -252,6 +254,13 @@ fn near_clifford_is_cheaper(circuit: &Circuit, peak: usize) -> bool {
 /// Whether a state vector of `n` qubits in precision `T` fits in 80% of
 /// physical memory.
 fn state_vector_fits<T: Real>(n: usize) -> bool {
+    let bytes = 2f64.powi(n as i32) * 2.0 * size_of::<T>() as f64;
+    bytes <= 0.8 * physical_memory()
+}
+
+/// Physical memory in bytes.
+#[cfg(unix)]
+fn physical_memory() -> f64 {
     // SAFETY: sysconf has no preconditions.
     let (pages, page) = unsafe {
         (
@@ -259,9 +268,13 @@ fn state_vector_fits<T: Real>(n: usize) -> bool {
             libc::sysconf(libc::_SC_PAGESIZE),
         )
     };
-    let memory = (pages.max(0) as f64) * (page.max(0) as f64);
-    let bytes = 2f64.powi(n as i32) * 2.0 * size_of::<T>() as f64;
-    bytes <= 0.8 * memory
+    (pages.max(0) as f64) * (page.max(0) as f64)
+}
+
+/// Physical memory in bytes: a conservative 8 GiB where it is not queried.
+#[cfg(not(unix))]
+fn physical_memory() -> f64 {
+    8.0 * (1u64 << 30) as f64
 }
 
 /// Run `circuit` for `shots` shots and count the classical outcomes.
@@ -279,7 +292,16 @@ pub fn run<T: Real>(
     shots: usize,
     options: &Options,
 ) -> std::io::Result<RunResult> {
-    let backend = match options.backend {
+    let backend = choose_backend::<T>(circuit, options);
+    let mut result = run_on::<T>(backend, circuit, shots, options)?;
+    result.stats.backend = Some(backend);
+    Ok(result)
+}
+
+/// The backend [`run`] uses for `circuit` with `options` (`options.backend`
+/// unless it is [`Backend::Auto`]).
+pub fn choose_backend<T: Real>(circuit: &Circuit, options: &Options) -> Backend {
+    match options.backend {
         Backend::Auto if crate::stabilizer::is_clifford(circuit) => Backend::Stabilizer,
         Backend::Auto => {
             let fits = state_vector_fits::<T>(circuit.num_qubits);
@@ -294,7 +316,15 @@ pub fn run<T: Real>(
             }
         }
         chosen => chosen,
-    };
+    }
+}
+
+fn run_on<T: Real>(
+    backend: Backend,
+    circuit: &Circuit,
+    shots: usize,
+    options: &Options,
+) -> std::io::Result<RunResult> {
     match backend {
         Backend::Stabilizer => {
             return crate::stabilizer::run(circuit, shots, options.seed)

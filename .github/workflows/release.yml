@@ -1,0 +1,112 @@
+name: Release
+
+# Publish qevedo-simulator to PyPI when a version tag (vX.Y.Z) is pushed. The
+# tag must match the version in python/Cargo.toml and CI must pass.
+#
+# Publishing uses PyPI trusted publishing: on pypi.org, add a (pending)
+# trusted publisher for project "qevedo-simulator", owner "qevedo",
+# repository "qvd-simulator", workflow "release.yml", environment "pypi".
+#
+# x86-64 wheels target x86-64-v3 (AVX2 + FMA, 2013-2015 processors and newer)
+# for qvd's AVX2 kernels; the repository's own `-C target-cpu=native` must not
+# leak into wheels, so every build sets RUSTFLAGS.
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check the tag against the version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' python/Cargo.toml | head -1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match python/Cargo.toml version $version"
+            exit 1
+          fi
+
+  wheels:
+    needs: [ci, check]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64, rustflags: "-C target-cpu=x86-64-v3" }
+          - { os: ubuntu-latest, target: aarch64, rustflags: "-C target-cpu=generic" }
+          - { os: macos-latest, target: aarch64, rustflags: "-C target-cpu=apple-m1" }
+          - { os: macos-latest, target: x86_64, rustflags: "-C target-cpu=x86-64-v3" }
+          - { os: windows-latest, target: x64, rustflags: "-C target-cpu=x86-64-v3" }
+    runs-on: ${{ matrix.os }}
+    env:
+      RUSTFLAGS: ${{ matrix.rustflags }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: python
+          target: ${{ matrix.target }}
+          args: --release --out dist
+          manylinux: auto
+          docker-options: -e RUSTFLAGS
+      - name: Check the x86-64 Linux wheel
+        if: matrix.os == 'ubuntu-latest' && matrix.target == 'x86_64'
+        run: |
+          python -m pip install python/dist/*.whl
+          python -c "import qevedo.simulator as s; assert s.uses_avx2(); print(s.run(s.Circuit(2).h(0).cx(0, 1).t(1).measure_all(), 100, seed=1).counts)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}-${{ matrix.target }}
+          path: python/dist/
+
+  sdist:
+    needs: [ci, check]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: python
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: python/dist/
+
+  publish:
+    needs: [wheels, sdist]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/qevedo-simulator/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes

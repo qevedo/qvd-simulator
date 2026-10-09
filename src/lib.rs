@@ -15,6 +15,7 @@ mod measure;
 pub mod memory;
 pub mod mps;
 pub mod nearclifford;
+pub mod qasm;
 pub mod reference;
 pub mod simd;
 pub mod simulator;
@@ -24,5 +25,5 @@ pub mod threads;
 
 pub use circuit::{Circuit, Gate, Instruction};
 pub use matrix::{C64, Matrix};
-pub use simulator::{Backend, Options, RunResult, Stats, run, statevector};
+pub use simulator::{Backend, Options, RunResult, Stats, choose_backend, run, statevector};
 pub use state::StateVector;

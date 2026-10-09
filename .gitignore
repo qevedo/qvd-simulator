@@ -1,3 +1,8 @@
 /target
 /.bench-venv
 __pycache__
+/python/target
+/python/python/qevedo/simulator/*.so
+/python/python/qevedo/simulator/*.pyd
+/python/dist
+.pytest_cache
