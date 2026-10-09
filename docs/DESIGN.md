@@ -280,7 +280,69 @@ stabilizers repeating from round to round (d = 3, 5, 7), reproducibility
 across thread counts, parallel gate layers against the same gates in order
 (from both layouts), and 64×64 transposes.
 
-## 8. Not done yet
+## 8. Matrix product state backend (`mps/`)
+
+Past the state vector's memory, circuits with limited entanglement still
+fit as a matrix product state: one tensor `A[l, p, r]` per qubit, joined by
+bonds of dimension χ, `O(n χ²)` memory. `Backend::Auto` uses it for
+non-Clifford circuits whose state vector would not fit in 80% of memory;
+`Backend::Mps` forces it.
+
+**Gates.** A one-qubit gate updates one site and keeps its canonical form.
+A gate on `k` qubits moves them next to each other with adjacent SWAPs,
+around the qubit at the median site, and leaves them there (lazy
+permutation, as quimb's `CircuitPermMPS`; swapping them back after each
+gate made the fidelity neither better nor worse on grid circuits and costs
+twice the SWAPs). Their sites are then contracted into one tensor, the
+gate's matrix is applied to its physical index, and the block is split back
+by `k - 1` SVDs. The state is kept in mixed canonical form around an
+orthogonality center (moved with QR), so each SVD sees the exact Schmidt
+coefficients of its bond: keeping the largest χ, and dropping the smallest
+while their squares sum to at most the threshold, is the optimal cut. The
+product of the kept weights is the fidelity estimate. On a 4×5 grid it
+tracks the true overlap with the exact state within a factor of two down to
+10⁻⁹, and on 1D circuits it matches quimb's estimate to four digits.
+
+**SVD.** faer 0.24's thin SVD, which runs on the rayon pool (12.6 s vs 22 s
+single-threaded for the 64-qubit depth-20 case). On one 128×128 matrix, finite
+and well scaled but with nearly degenerate leading singular values, it
+returned NaN factors. Every SVD is therefore checked; the SVD of the
+adjoint, then a Hermitian eigendecomposition of the Gram matrix, are the
+fallbacks, and the unit tests run all three methods.
+
+**Sampling.** With every site but the first right-canonical, a shot is drawn
+site by site from the left, keeping only a running left vector. The vectors
+of a batch of 256 shots form a matrix, so each site costs two matrix
+products: 1000 shots of the 64-qubit χ = 256 state take 0.7 s instead of
+2.8 s shot by shot. Each batch has its own random stream, so results depend
+only on the seed. Circuits with mid-circuit measurements or resets run the
+gates before the first one once, then each shot continues from a copy.
+
+**Against Qiskit Aer and quimb** (same QASM, same truncation, 1000 shots, 8
+threads; `benchmarks/compare_mps.py`):
+
+| Circuit | χ cap | qvd | Qiskit Aer 0.17 MPS | quimb 1.15 `CircuitPermMPS` |
+|---|---|---|---|---|
+| Random 1D, 64 qubits, depth 10 | 256 | **0.057 s** | 0.25 s | 10.3 s (0.23 s gates) |
+| Random 1D, 64 qubits, depth 20 | 256 | **12.3 s** | 114 s | 31.9 s (14.4 s gates) |
+| Random 1D, 100 qubits, depth 16 | 128 | **3.6 s** | 18.0 s | 25.5 s (4.1 s gates) |
+| Random 8×8 grid, depth 10 | 64 | **5.5 s** | 10.2 s | 18.4 s (5.8 s gates) |
+| QFT, 100 qubits | 256 | **0.078 s** | 0.11 s | 21.7 s (3.1 s gates) |
+
+Gates cost about what quimb's do (both are SVD-bound); Aer is 1.4–9×
+slower; quimb's total is dominated by sampling shot by shot in Python. The
+research target, a 64-qubit depth-10 random circuit within quimb's ~10 s, is
+met by a wide margin for the 1D circuit; the 2D grid is the harder case,
+where the SWAP routing multiplies the SVDs.
+
+**Correctness** (`tests/mps.rs`): exact states against the dense reference
+for random circuits over the full gate set (non-adjacent and three-qubit
+gates), measurement against dense projection, sampled distributions with
+mid-circuit measurement and reset against exact branching, truncation
+bounds and fidelity tracking, a 300-qubit GHZ state chosen automatically,
+long-range routing, and reproducibility across thread counts.
+
+## 9. Not done yet
 
 - **Calibration.** Fusion width (4) and region size (2^14 blocks) are fixed
   defaults chosen from the measurements above. A per-machine calibration
@@ -288,10 +350,14 @@ across thread counts, parallel gate layers against the same gates in order
   them.
 - **Smarter stage planning.** The lookahead is greedy; Atlas finds a
   minimal number of stages with an ILP.
-- **Other backends.** MPS, near-Clifford and Pauli propagation backends,
-  and selection between them beyond the Clifford check, are the roadmap in
-  the README. With the stabilizer backend, they are what takes structured
-  circuits past the 32-qubit wall.
+- **Other backends.** Near-Clifford and Pauli propagation backends, and
+  selection beyond "Clifford, else state vector if it fits, else MPS" (for
+  example from gate counts crossing each cut, which bound χ), are the
+  roadmap in the README.
+- **Faster MPS.** Gates applied one at a time are SVD-bound: applying
+  non-overlapping gates in parallel (Vidal's form), a randomized or Gram
+  SVD when χ is capped well below the bond's rank, and smarter qubit
+  ordering for 2D circuits would each help.
 - **Fewer cache misses in the stabilizer reference shot.** Its gates are
   cache misses in a 208 MB tableau at d = 101. Storing each row's x and z
   words side by side would halve them. Random measurements (the first and

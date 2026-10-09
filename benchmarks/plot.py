@@ -38,6 +38,7 @@ COLORS = {
     "stim, flip simulator": "#30638e",
     "stim, sample()": "#8fb8de",
     "qiskit-aer, stabilizer": "#edae49",
+    "quimb": "#66a182",
 }
 
 
@@ -137,8 +138,41 @@ def stabilizer_steps():
     save(fig, "stabilizer_steps.svg")
 
 
+def mps():
+    rows = read("mps.csv")
+    cases = []
+    times = defaultdict(dict)
+    for r in rows:
+        case = (r["circuit"], int(r["qubits"]), r["depth"], int(r["max_bond"]))
+        if case not in cases:
+            cases.append(case)
+        times[r["simulator"]][case] = float(r["seconds"])
+    simulators = ["qvd", "qiskit-aer", "quimb"]
+    width = 0.27
+    fig, ax = plt.subplots(figsize=(10, 4.2))
+    for i, sim in enumerate(simulators):
+        xs = [c + (i - 1) * width for c in range(len(cases))]
+        ys = [times[sim][case] for case in cases]
+        bars = ax.bar(xs, ys, width, label=sim, color=COLORS[sim])
+        if sim == "qvd":
+            ax.bar_label(bars, labels=[f"{y:g}" for y in ys], fontsize=8, padding=2)
+    ax.set_yscale("log")
+    ax.set_ylabel("seconds, gates + 1000 shots (log scale)")
+    ax.set_xticks(range(len(cases)))
+    names = {"random-1d": "Random 1D", "random-grid-8x8": "Random 8x8 grid", "qft": "QFT"}
+    ax.set_xticklabels(
+        [f"{names[c]}\n{q} qubits" + (f", depth {d}" if d else "") + f"\nχ ≤ {b}" for c, q, d, b in cases],
+        fontsize=9,
+    )
+    ax.set_ylim(top=max(max(t.values()) for t in times.values()) * 8)
+    ax.set_title("Matrix product states, same truncation (i9-14900K, 8 threads)")
+    ax.legend(frameon=False, ncols=3, loc="upper left")
+    save(fig, "mps.svg")
+
+
 if __name__ == "__main__":
     statevector()
+    mps()
     stabilizer()
     stabilizer_steps()
     print(f"wrote {', '.join(p.name for p in sorted(CHARTS.glob('*.svg')))}")

@@ -15,14 +15,17 @@ use crate::state::StateVector;
 /// Which simulation method [`run`] uses.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Backend {
-    /// The stabilizer backend for Clifford circuits, otherwise the state
-    /// vector.
+    /// The stabilizer backend for Clifford circuits; otherwise the state
+    /// vector if it fits in memory, and a matrix product state if not.
     #[default]
     Auto,
     /// Dense state vector: any circuit, up to ~32 qubits.
     StateVector,
     /// Stabilizer tableau and Pauli frames: Clifford circuits only, any size.
     Stabilizer,
+    /// Matrix product state: any circuit and size, exact while the
+    /// entanglement fits in `max_bond_dimension`, approximate beyond.
+    Mps,
 }
 
 /// Simulator settings.
@@ -38,6 +41,11 @@ pub struct Options {
     /// Cache blocking: apply runs of gates to cache-sized regions of
     /// `2^region_bits` blocks before moving on. `None` disables it.
     pub region_bits: Option<u32>,
+    /// MPS: the largest bond dimension χ kept after each gate.
+    pub max_bond_dimension: usize,
+    /// MPS: drop the smallest singular values while the sum of their
+    /// squares is at most this fraction of the total.
+    pub truncation_threshold: f64,
 }
 
 impl Default for Options {
@@ -47,6 +55,8 @@ impl Default for Options {
             max_fused_qubits: 4,
             seed: None,
             region_bits: Some(DEFAULT_REGION_BITS),
+            max_bond_dimension: 256,
+            truncation_threshold: 1e-16,
         }
     }
 }
@@ -65,6 +75,12 @@ pub struct Stats {
     pub gate_seconds: f64,
     /// Seconds spent sampling and measuring.
     pub measure_seconds: f64,
+    /// Approximate backends (MPS): the estimated fidelity with the exact
+    /// state, the product of the weights kept at each truncation. The
+    /// lowest over shots when shots are simulated separately.
+    pub fidelity: Option<f64>,
+    /// MPS: the largest bond dimension reached.
+    pub max_bond_dimension: Option<usize>,
 }
 
 /// The result of running a circuit with shots.
@@ -142,7 +158,7 @@ pub fn statevector<T: Real>(
 
 /// Index of the first instruction after which only measurements (and
 /// barriers) follow, if every measured qubit is untouched afterwards.
-fn terminal_measurements(circuit: &Circuit) -> Option<usize> {
+pub(crate) fn terminal_measurements(circuit: &Circuit) -> Option<usize> {
     let mut split = circuit.instructions.len();
     for (i, instruction) in circuit.instructions.iter().enumerate().rev() {
         match instruction {
@@ -204,7 +220,7 @@ pub(crate) fn counts_from_keys(mut keys: Vec<u128>, num_clbits: usize) -> BTreeM
     counts
 }
 
-fn bitstring(clbits: &[bool]) -> String {
+pub(crate) fn bitstring(clbits: &[bool]) -> String {
     clbits
         .iter()
         .rev()
@@ -212,11 +228,27 @@ fn bitstring(clbits: &[bool]) -> String {
         .collect()
 }
 
+/// Whether a state vector of `n` qubits in precision `T` fits in 80% of
+/// physical memory.
+fn state_vector_fits<T: Real>(n: usize) -> bool {
+    // SAFETY: sysconf has no preconditions.
+    let (pages, page) = unsafe {
+        (
+            libc::sysconf(libc::_SC_PHYS_PAGES),
+            libc::sysconf(libc::_SC_PAGESIZE),
+        )
+    };
+    let memory = (pages.max(0) as f64) * (page.max(0) as f64);
+    let bytes = 2f64.powi(n as i32) * 2.0 * size_of::<T>() as f64;
+    bytes <= 0.8 * memory
+}
+
 /// Run `circuit` for `shots` shots and count the classical outcomes.
 ///
 /// With [`Backend::Auto`], Clifford circuits go to the stabilizer backend
-/// (any number of qubits) and others to the state vector with precision
-/// `T`. On the state vector, circuits whose measurements all come at the
+/// (any number of qubits), others to the state vector with precision `T`
+/// if it fits in 80% of physical memory, and to a matrix product state if
+/// not. On the state vector, circuits whose measurements all come at the
 /// end are simulated once and sampled; mid-circuit measurements and resets
 /// are simulated shot by shot.
 pub fn run<T: Real>(
@@ -224,13 +256,19 @@ pub fn run<T: Real>(
     shots: usize,
     options: &Options,
 ) -> std::io::Result<RunResult> {
-    let stabilizer = match options.backend {
-        Backend::Stabilizer => true,
-        Backend::StateVector => false,
-        Backend::Auto => crate::stabilizer::is_clifford(circuit),
+    let backend = match options.backend {
+        Backend::Auto if crate::stabilizer::is_clifford(circuit) => Backend::Stabilizer,
+        Backend::Auto if !state_vector_fits::<T>(circuit.num_qubits) => Backend::Mps,
+        Backend::Auto => Backend::StateVector,
+        chosen => chosen,
     };
-    if stabilizer {
-        return crate::stabilizer::run(circuit, shots, options.seed).map_err(std::io::Error::other);
+    match backend {
+        Backend::Stabilizer => {
+            return crate::stabilizer::run(circuit, shots, options.seed)
+                .map_err(std::io::Error::other);
+        }
+        Backend::Mps => return Ok(crate::mps::run(circuit, shots, options)),
+        _ => {}
     }
     let mut rng = match options.seed {
         Some(seed) => Pcg64::seed_from_u64(seed),

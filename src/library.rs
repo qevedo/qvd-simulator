@@ -59,6 +59,45 @@ pub fn random_circuit(n: usize, depth: usize, seed: u64) -> Circuit {
     c
 }
 
+/// A Google-style random circuit on a `rows x cols` grid (qubit
+/// `r * cols + c`): each layer applies √X, √Y or √W to every qubit, then CZ
+/// on one of four coupler patterns in turn (horizontal and vertical,
+/// alternating offsets), so every qubit entangles with all its grid
+/// neighbours every four layers.
+pub fn random_grid_circuit(rows: usize, cols: usize, depth: usize, seed: u64) -> Circuit {
+    let mut rng = Pcg64::seed_from_u64(seed);
+    let n = rows * cols;
+    let mut c = Circuit::new(n);
+    let half = std::f64::consts::FRAC_PI_2;
+    for layer in 0..depth {
+        for q in 0..n {
+            let gate = match rng.random_range(0..3) {
+                0 => Gate::RX(half),
+                1 => Gate::RY(half),
+                _ => Gate::U(
+                    half,
+                    -std::f64::consts::FRAC_PI_4,
+                    std::f64::consts::FRAC_PI_4,
+                ),
+            };
+            c.gate(gate, &[q]);
+        }
+        let offset = (layer / 2) % 2;
+        for r in 0..rows {
+            for col in 0..cols {
+                let q = r * cols + col;
+                if layer % 2 == 0 && col % 2 == offset && col + 1 < cols {
+                    c.cz(q, q + 1);
+                }
+                if layer % 2 == 1 && r % 2 == offset && r + 1 < rows {
+                    c.cz(q, q + cols);
+                }
+            }
+        }
+    }
+    c
+}
+
 /// A random circuit over the full standard gate set (rotations with random
 /// angles, CX/CZ/CP/SWAP/CCX on random qubits). Used for correctness tests.
 pub fn random_gate_circuit(n: usize, gates: usize, seed: u64) -> Circuit {

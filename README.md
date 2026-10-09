@@ -12,7 +12,11 @@ below).
 Clifford circuits go to a stabilizer backend instead, which has no 2ⁿ
 memory wall: a distance-101 surface code (20,401 qubits, 5.1M gates, 1M
 measurements) samples 10,000 shots in 1.5 s, 8× faster than Stim and
-2.8× faster on a single thread (details below).
+2.8× faster on a single thread (details below). Other circuits too large
+for a state vector run on a matrix product state backend, exact while the
+entanglement is low and approximate, with a fidelity estimate, beyond: it is
+1.4–5× faster than the faster of Qiskit Aer's and quimb's MPS simulators on
+the same circuits.
 
 ## How it works
 
@@ -94,6 +98,31 @@ additions matter at this scale:
 - gates on disjoint qubits run in parallel in the reference shot;
 - frames run in parallel, cache-sized blocks.
 
+### Low-entanglement circuits (MPS)
+
+![MPS benchmark: qvd vs Qiskit Aer vs quimb](benchmarks/charts/mps.svg)
+
+1000 shots each, the same truncation in all three (at most χ singular
+values per bond, discarded weight below 10⁻¹⁶), 8 threads. Random 1D
+circuits are brick-pattern versions of the random circuits above; the grid
+circuit applies CZ on all four coupler orientations of an 8×8 grid in turn.
+
+| Circuit | χ cap | qvd | Qiskit Aer 0.17 MPS | quimb 1.15 `CircuitPermMPS` | Fidelity estimate |
+|---|---|---|---|---|---|
+| Random 1D, 64 qubits, depth 10 | 256 | **0.057 s** | 0.25 s | 10.3 s | 1 (exact, χ = 32) |
+| Random 1D, 64 qubits, depth 20 | 256 | **12.3 s** | 114 s | 31.9 s | 1.8×10⁻⁵ |
+| Random 1D, 100 qubits, depth 16 | 128 | **3.6 s** | 18.0 s | 25.5 s | 7.6×10⁻⁷ |
+| Random 8×8 grid, depth 10 | 64 | **5.5 s** | 10.2 s | 18.4 s | 2.4×10⁻¹⁵ |
+| QFT, 100 qubits | 256 | **0.078 s** | 0.11 s | 21.7 s | 1 (χ = 1) |
+
+qvd's fidelity estimates agree with quimb's to four digits on the 1D
+circuits. Low numbers are the circuits' entanglement exceeding χ, not
+numerical trouble: on a 4×5 grid small enough to check against the exact
+state, the estimate tracks the true overlap within a factor of two.
+quimb's time is mostly sampling, which it does shot by shot in Python.
+These runs shared the machine with a busy virtual machine, for all three
+alike.
+
 ## How many qubits?
 
 A full state of *n* qubits holds 2ⁿ amplitudes: 8 bytes each in single
@@ -111,8 +140,8 @@ source shows a general 40-qubit simulation on one workstation: the records
 (45 qubits in 2017, 50 in 2025) used supercomputers. Larger qubit counts on
 one machine are possible only for circuits with structure: Clifford
 circuits (qvd's stabilizer backend handles 20,000 qubits in seconds),
-low-entanglement circuits (matrix product states), or a few amplitudes
-rather than the whole state.
+low-entanglement circuits (qvd's MPS backend: 100 qubits and more), or a few
+amplitudes rather than the whole state.
 
 ## Usage
 
@@ -141,9 +170,13 @@ significant bit), and `Circuit::to_qasm` exports OpenQASM 2.
 
 `run` picks the backend: with the default `Backend::Auto`, circuits made only
 of Clifford gates (including rotations by multiples of π/2), measurements and
-resets run on the stabilizer backend, and everything else on the state
-vector. For many shots or many classical bits, `stabilizer::sample` returns
-bit-packed results without building strings:
+resets run on the stabilizer backend; everything else runs on the state
+vector if it fits in 80% of memory, and on a matrix product state if not.
+`Backend::Mps` forces the MPS; `Options::max_bond_dimension` (default 256)
+and `Options::truncation_threshold` (default 10⁻¹⁶) set its truncation, and
+`result.stats.fidelity` reports the estimated fidelity. For many shots or
+many classical bits, `stabilizer::sample` returns bit-packed results without
+building strings:
 
 ```rust
 let circuit = qvd::library::surface_code(25, 25);
@@ -172,14 +205,18 @@ cargo run --release --example kernels -- 30 f32    # gate cost vs. one memory sw
 cargo run --release --example bench -- random 28 20 f32 4 14 --qasm /tmp/c.qasm
 cargo run --release --example shots -- 28 1000000
 cargo run --release --example stabilizer -- surface 101 101 10000 --qasm /tmp/s.qasm
+cargo run --release --example mps -- random 64 20 256 1000 --qasm /tmp/m.qasm
 
 # Compare with Qiskit Aer and qsim on the same circuit:
 python3 -m venv .bench-venv
-.bench-venv/bin/pip install qiskit qiskit-aer qsimcirq cirq-core ply stim matplotlib
+.bench-venv/bin/pip install qiskit qiskit-aer qsimcirq cirq-core ply stim matplotlib quimb
 .bench-venv/bin/python benchmarks/compare.py /tmp/c.qasm --precision single --threads 32
 
 # Clifford circuits against Stim and Aer's stabilizer method:
 .bench-venv/bin/python benchmarks/compare_stim.py /tmp/s.qasm --shots 10000
+
+# MPS circuits against Qiskit Aer and quimb (pip install quimb):
+.bench-venv/bin/python benchmarks/compare_mps.py /tmp/m.qasm --max-bond 256 --shots 1000
 
 # Redraw benchmarks/charts/ from benchmarks/results/*.csv:
 .bench-venv/bin/python benchmarks/plot.py
@@ -193,7 +230,8 @@ off). `QVD_PLACEMENT=pcores|pthreads|allcores|all` selects the threads.
 
 1. ~~Stabilizer (Clifford) backend~~ (done, with automatic selection of
    Clifford circuits).
-2. Matrix product state backend for low-entanglement circuits past 32 qubits.
+2. ~~Matrix product state backend~~ (done; chosen automatically when the
+   state vector does not fit).
 3. Near-Clifford backend (Clifford frame + small dense state, reusing these
    kernels) and Pauli propagation for expectation values.
 4. Backend selection beyond the Clifford check.

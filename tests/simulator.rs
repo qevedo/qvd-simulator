@@ -16,6 +16,7 @@ fn circuits_match_reference_for_every_fusion_width() {
                 max_fused_qubits,
                 seed: None,
                 region_bits: None,
+                ..Options::default()
             };
             let (state, stats) = statevector::<f64>(&circuit, &options).unwrap();
             let error = max_distance(&state.to_vec(), &expected);
@@ -175,6 +176,7 @@ fn cache_blocking_matches_reference() {
                     max_fused_qubits,
                     seed: None,
                     region_bits: Some(region_bits),
+                    ..Options::default()
                 };
                 let (state, stats) = statevector::<f64>(&circuit, &options).unwrap();
                 let error = max_distance(&state.to_vec(), &expected);

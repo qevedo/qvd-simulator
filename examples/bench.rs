@@ -66,6 +66,7 @@ fn main() {
         max_fused_qubits: fusion,
         seed: None,
         region_bits: (region > 0).then_some(region),
+        ..Options::default()
     };
     let amplitudes = flag("--amplitudes");
     let placement = match std::env::var("QVD_PLACEMENT").as_deref() {

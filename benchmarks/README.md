@@ -10,10 +10,12 @@ benchmarks/
 │   ├── machine.json            hardware, versions, measurement notes
 │   ├── statevector.csv         dense simulation: qvd vs qsim vs Qiskit Aer
 │   ├── stabilizer.csv          Clifford circuits: qvd vs Stim vs Qiskit Aer
+│   ├── mps.csv                 matrix product states: qvd vs Qiskit Aer vs quimb
 │   └── stabilizer_steps.csv    how each optimisation changed the d=101 time
 ├── charts/                     SVGs drawn from results/ by plot.py
 ├── compare.py                  times Qiskit Aer and qsim on a QASM file
 ├── compare_stim.py             times Stim and Qiskit Aer's stabilizer method
+├── compare_mps.py              times Qiskit Aer's and quimb's MPS simulators
 └── plot.py                     results/*.csv -> charts/*.svg
 ```
 
@@ -25,7 +27,7 @@ times in seconds, so they can be loaded directly by other tools or pages.
 Intel Core i9-14900K (8 P-cores with hyper-threading + 16 E-cores, 32
 threads, AVX2 + FMA, no AVX-512), 62 GB DDR5, Linux 7.0, Rust 1.96. Python
 packages: qiskit 2.5.2, qiskit-aer 0.17.2, qsimcirq 0.22.1, cirq-core 1.7.0,
-stim 1.16.0. Measured on 2026-10-09.
+stim 1.16.0, quimb 1.15.0. Measured on 2026-10-09.
 
 ## State-vector simulation
 
@@ -65,11 +67,23 @@ measured under the heavier load; under that same load the build before it
 took 2.57 s. [docs/DESIGN.md](../docs/DESIGN.md)
 explains each one.
 
+## Matrix product states
+
+![MPS benchmark](charts/mps.svg)
+
+1000 shots, χ capped as labelled and the smallest singular values dropped
+while their squares sum below 10⁻¹⁶, in all three simulators. qvd ran on 8
+P-cores (best of three), Qiskit Aer with 8 threads, quimb's
+`CircuitPermMPS` with 8 BLAS threads after a warm-up. Aer reports only a
+total; `mps.csv` has gate and sampling times for the other two, and the
+fidelity estimates. A busy virtual machine shared the machine during these
+runs, for all three alike.
+
 ## Reproducing
 
 ```sh
 python3 -m venv .bench-venv
-.bench-venv/bin/pip install qiskit qiskit-aer qsimcirq cirq-core ply stim matplotlib
+.bench-venv/bin/pip install qiskit qiskit-aer qsimcirq cirq-core ply stim matplotlib quimb
 
 # State vector: qvd's time is printed; the QASM file feeds the others.
 cargo run --release --example bench -- random 28 20 f32 4 14 --qasm /tmp/c.qasm
@@ -78,6 +92,10 @@ cargo run --release --example bench -- random 28 20 f32 4 14 --qasm /tmp/c.qasm
 # Clifford: surface code of distance 51, 51 rounds, 10,000 shots.
 cargo run --release --example stabilizer -- surface 51 51 10000 --qasm /tmp/s.qasm
 .bench-venv/bin/python benchmarks/compare_stim.py /tmp/s.qasm --shots 10000
+
+# MPS: 64 qubits, depth 20, χ ≤ 256, 1000 shots.
+cargo run --release --example mps -- random 64 20 256 1000 --qasm /tmp/m.qasm
+.bench-venv/bin/python benchmarks/compare_mps.py /tmp/m.qasm --max-bond 256 --shots 1000
 
 # After editing results/*.csv:
 .bench-venv/bin/python benchmarks/plot.py
@@ -88,4 +106,5 @@ cargo run --release --example stabilizer -- surface 51 51 10000 --qasm /tmp/s.qa
 off); `QVD_PLACEMENT=pcores|pthreads|allcores|all` selects the threads. The
 `stabilizer` example takes `surface <distance> <rounds> <shots>` or
 `random <qubits> <depth> <shots>`; `QVD_THREADS=pcores|all|<n>` selects the
-threads (P-cores by default).
+threads (P-cores by default). The `mps` example takes
+`<random|grid|qft|ghz> <qubits | ROWSxCOLS> <depth> <max bond> [shots]`.

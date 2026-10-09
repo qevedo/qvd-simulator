@@ -13,6 +13,7 @@ pub mod library;
 pub mod matrix;
 mod measure;
 pub mod memory;
+pub mod mps;
 pub mod reference;
 pub mod simd;
 pub mod simulator;

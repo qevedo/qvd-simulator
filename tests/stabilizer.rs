@@ -2,6 +2,8 @@
 
 mod common;
 
+use common::{exact_distribution, project};
+
 use std::f64::consts::FRAC_PI_2;
 
 use qvd::reference;
@@ -136,22 +138,6 @@ fn deterministic_measurements_match_dense_probabilities() {
 }
 
 /// Project a dense state on `qubit = outcome` and renormalise.
-fn project(state: &mut [C64], qubit: usize, outcome: bool) -> f64 {
-    let p: f64 = state
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| ((i >> qubit) & 1 == 1) == outcome)
-        .map(|(_, a)| a.norm_sqr())
-        .sum();
-    for (i, a) in state.iter_mut().enumerate() {
-        *a = if ((i >> qubit) & 1 == 1) == outcome {
-            *a / p.sqrt()
-        } else {
-            C64::new(0.0, 0.0)
-        };
-    }
-    p
-}
 
 #[test]
 fn collapse_matches_dense_projection() {
@@ -194,65 +180,6 @@ fn collapse_matches_dense_projection() {
             );
         }
     }
-}
-
-/// The exact distribution of the classical bits, branching on every
-/// measurement and reset of a dense simulation.
-fn exact_distribution(circuit: &Circuit) -> std::collections::BTreeMap<String, f64> {
-    fn walk(
-        circuit: &Circuit,
-        from: usize,
-        mut state: Vec<C64>,
-        clbits: Vec<bool>,
-        weight: f64,
-        out: &mut std::collections::BTreeMap<String, f64>,
-    ) {
-        for (i, instruction) in circuit.instructions.iter().enumerate().skip(from) {
-            let (qubit, clbit) = match instruction {
-                Instruction::Gate { gate, qubits } => {
-                    reference::apply(&mut state, &gate.matrix(), qubits);
-                    continue;
-                }
-                Instruction::Barrier { .. } => continue,
-                Instruction::Measure { qubit, clbit } => (*qubit, Some(*clbit)),
-                Instruction::Reset { qubit } => (*qubit, None),
-            };
-            // Branch on the outcome.
-            for outcome in [false, true] {
-                let mut branch = state.clone();
-                let p = project(&mut branch, qubit, outcome);
-                if p < 1e-12 {
-                    continue;
-                }
-                let mut bits = clbits.clone();
-                match clbit {
-                    Some(c) => bits[c] = outcome,
-                    None if outcome => reference::apply(&mut branch, &Gate::X.matrix(), &[qubit]),
-                    None => {}
-                }
-                walk(circuit, i + 1, branch, bits, weight * p, out);
-            }
-            return;
-        }
-        let key: String = clbits
-            .iter()
-            .rev()
-            .map(|&b| if b { '1' } else { '0' })
-            .collect();
-        *out.entry(key).or_default() += weight;
-    }
-    let mut state = vec![C64::new(0.0, 0.0); 1 << circuit.num_qubits];
-    state[0] = C64::new(1.0, 0.0);
-    let mut out = std::collections::BTreeMap::new();
-    walk(
-        circuit,
-        0,
-        state,
-        vec![false; circuit.num_clbits],
-        1.0,
-        &mut out,
-    );
-    out
 }
 
 #[test]

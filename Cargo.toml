@@ -3,7 +3,7 @@ name = "qvd"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.87"
-description = "A quantum circuit state-vector simulator built for memory bandwidth: AVX2 kernels, gate fusion and cache-blocked stages"
+description = "A fast quantum circuit simulator: an AVX2 state vector built for memory bandwidth, a stabilizer backend for Clifford circuits and a matrix product state backend for low entanglement"
 license = "MIT"
 repository = "https://github.com/qevedo/qvd-simulator"
 keywords = ["quantum", "simulator", "quantum-computing", "statevector", "simd"]
@@ -11,6 +11,7 @@ categories = ["science", "simulation"]
 
 [dependencies]
 core_affinity = "0.8.3"
+faer = { version = "0.24.4", default-features = false, features = ["std", "rayon", "linalg"] }
 libc = "0.2.190"
 num-complex = "0.4.6"
 rand = "0.10.3"
