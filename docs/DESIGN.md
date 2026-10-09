@@ -303,12 +303,79 @@ product of the kept weights is the fidelity estimate. On a 4×5 grid it
 tracks the true overlap with the exact state within a factor of two down to
 10⁻⁹, and on 1D circuits it matches quimb's estimate to four digits.
 
+**Parallel layers, only where exact.** Gates on disjoint sites can run in
+parallel in a different form: every site right-canonical and every bond's
+Schmidt coefficients stored. A step then needs only its own sites and the
+coefficients `Λ` of the bond to its left. The block is split by SVDs of
+`diag(Λ) θ` from the right, and its first site becomes `θ` times the adjoint
+of the new rest, so no coefficient is ever inverted (Hastings, PRB 79,
+165102). The planner routes every gate first, as bookkeeping that emits SWAP
+steps. Each step is then classified with an upper bound on its new bonds:
+neighbouring bonds times `2^j`, and the old bond times the gate's operator
+Schmidt rank (2 for CZ and CX, 4 for SWAP). Runs of steps that cannot reach
+χ_max are scheduled as early as their sites allow and run in parallel
+layers. Steps that may truncate run one at a time, in circuit order, with
+the moving center.
+
+Running truncating steps in parallel was tried and rejected. It truncates
+all bonds of a layer at once, each from the state before the others, and it
+needs a full SVD sweep after every truncating layer to restore the form.
+Even then, on the 64-qubit depth-20 circuit at χ = 256 the fidelity fell
+from 1.8×10⁻⁵ to 5.7×10⁻⁹, and on small circuits the true overlap fell by
+2–5×. As built, results under truncation equal the sequential ones (the same
+fidelity estimates as quimb's), apart from the choice among exactly equal
+singular values at a cut, which these √X/CZ circuits often have.
+
+**Small products.** faer dispatches every matrix product to the thread pool.
+For the χ = 1 or 2 tensors that dominate early layers and QFT-like circuits,
+that overhead was most of the time: a 100-qubit QFT took 0.92 s on the
+default 32-thread pool, 0.10 s once small products (under 2¹⁸
+multiply-adds) ran sequentially. The operator Schmidt rank of each gate,
+needed for the bounds above, is a 4×4 Gaussian elimination rather than an
+SVD call for the same reason.
+
+Against the previous version, same machine and load, best of three:
+
+| Circuit | Before | After |
+|---|---|---|
+| Random 1D, 64 qubits, depth 10 (exact) | 0.070 s | **0.018 s** |
+| Random 1D, 40 qubits, depth 16 (exact) | 2.31 s | **0.54 s** |
+| Random 1D, 64 qubits, depth 20, χ = 256 | 15.2 s | **8.5 s** (same fidelity) |
+| Random 1D, 100 qubits, depth 16, χ = 128 | 4.08 s | **1.90 s** (same fidelity) |
+| Random 8×8 grid, depth 10, χ = 64 | 6.28 s | 6.28 s |
+| QFT, 100 qubits | 0.084 s | **0.040 s** |
+
+**Qubit order.** The bond between two sites is at most `2^(gates crossing
+it)`, so the qubits are placed on sites to keep interacting qubits close.
+Three orders compete: the circuit's own, reverse Cuthill–McKee, and the
+spectral order (the Laplacian's Fiedler vector). The winner is the one with
+the fewest gates across the worst cut, then across all cuts. Circuits whose
+labels follow their geometry keep their order. Circuits whose labels do not
+gain hugely:
+
+| Circuit | Circuit's order | Chosen order |
+|---|---|---|
+| 1D, 64 qubits, depth 12, labels scrambled, χ = 64 | 5.2 s, fidelity 4×10⁻¹² | **0.028 s, exact** |
+| 1D, 40 qubits, depth 16, labels scrambled, χ = 256 | 19.4 s, fidelity 1.2×10⁻⁴ | **0.42 s, exact** |
+| 6×10 grid, depth 12, χ = 64 (columns first) | 6.4 s, fidelity 5×10⁻¹⁹ | 5.1 s, fidelity 7×10⁻¹⁷ |
+| 8×8 grid, depth 10, labels scrambled, χ = 64 | fidelity 1.5×10⁻¹⁷ | fidelity 1.5×10⁻¹⁶ |
+
 **SVD.** faer 0.24's thin SVD, which runs on the rayon pool (12.6 s vs 22 s
 single-threaded for the 64-qubit depth-20 case). On one 128×128 matrix, finite
 and well scaled but with nearly degenerate leading singular values, it
 returned NaN factors. Every SVD is therefore checked; the SVD of the
 adjoint, then a Hermitian eigendecomposition of the Gram matrix, are the
 fallbacks, and the unit tests run all three methods.
+
+When χ_max binds on a large bond (at least 256 rows and columns), the
+eigendecomposition of the smaller Gram matrix is used instead: 46 ms
+against 106 ms for a 512×512 SVD, with singular values within 10⁻¹⁴. The
+other factor, `a` times the eigenvectors divided by the singular values, is
+accurate to about `10⁻¹⁶ (s_max/s)²`. It is therefore accepted only if every
+kept singular value is at least 10⁻³ of the largest. Otherwise the SVD runs,
+and that bond skips the Gram attempt for its next 32 splits. On the capped
+benchmarks this saves 30–35% (64 qubits, depth 20: 7.1 s → 5.0 s;
+100 qubits: 1.47 s → 1.0 s) with identical fidelity.
 
 **Sampling.** With every site but the first right-canonical, a shot is drawn
 site by site from the left, keeping only a running left vector. The vectors
@@ -323,17 +390,21 @@ threads; `benchmarks/compare_mps.py`):
 
 | Circuit | χ cap | qvd | Qiskit Aer 0.17 MPS | quimb 1.15 `CircuitPermMPS` |
 |---|---|---|---|---|
-| Random 1D, 64 qubits, depth 10 | 256 | **0.057 s** | 0.25 s | 10.3 s (0.23 s gates) |
-| Random 1D, 64 qubits, depth 20 | 256 | **12.3 s** | 114 s | 31.9 s (14.4 s gates) |
-| Random 1D, 100 qubits, depth 16 | 128 | **3.6 s** | 18.0 s | 25.5 s (4.1 s gates) |
-| Random 8×8 grid, depth 10 | 64 | **5.5 s** | 10.2 s | 18.4 s (5.8 s gates) |
-| QFT, 100 qubits | 256 | **0.078 s** | 0.11 s | 21.7 s (3.1 s gates) |
+| Random 1D, 64 qubits, depth 10 | 256 | **0.018 s** | 0.25 s | 10.3 s (0.23 s gates) |
+| Random 1D, 64 qubits, depth 20 | 256 | **8.5 s** | 114 s | 31.9 s (14.4 s gates) |
+| Random 1D, 100 qubits, depth 16 | 128 | **1.9 s** | 18.0 s | 25.5 s (4.1 s gates) |
+| Random 8×8 grid, depth 10 | 64 | **6.3 s** | 10.2 s | 18.4 s (5.8 s gates) |
+| QFT, 100 qubits | 256 | **0.040 s** | 0.11 s | 21.7 s (3.1 s gates) |
+| Random 1D, 64 qubits, depth 12, labels scrambled | 64 | **0.049 s** | 21.3 s | 26.6 s (10.5 s gates) |
 
-Gates cost about what quimb's do (both are SVD-bound); Aer is 1.4–9×
-slower; quimb's total is dominated by sampling shot by shot in Python. The
-research target, a 64-qubit depth-10 random circuit within quimb's ~10 s, is
-met by a wide margin for the 1D circuit; the 2D grid is the harder case,
-where the SWAP routing multiplies the SVDs.
+qvd's gates are 2–2.6× faster than quimb's on the 1D circuits and about
+equal on the grid. Aer is 1.6–14× slower in total, and quimb's total is
+dominated by sampling shot by shot in Python. On scrambled labels the
+qubit order makes the difference: exact at χ = 64 for qvd, 2×10⁻¹³ fidelity
+for quimb. qvd's column was measured last, under heavier load than the
+others. The research target, a 64-qubit depth-10 random circuit within
+quimb's ~10 s, is met by a wide margin for the 1D circuit. The 2D grid is
+the harder case, where the SWAP routing multiplies the SVDs.
 
 **Correctness** (`tests/mps.rs`): exact states against the dense reference
 for random circuits over the full gate set (non-adjacent and three-qubit
@@ -354,10 +425,12 @@ long-range routing, and reproducibility across thread counts.
   selection beyond "Clifford, else state vector if it fits, else MPS" (for
   example from gate counts crossing each cut, which bound χ), are the
   roadmap in the README.
-- **Faster MPS.** Gates applied one at a time are SVD-bound: applying
-  non-overlapping gates in parallel (Vidal's form), a randomized or Gram
-  SVD when χ is capped well below the bond's rank, and smarter qubit
-  ordering for 2D circuits would each help.
+- **Faster capped MPS.** Gates that truncate still run one at a time
+  (simultaneous truncation costs too much fidelity, see section 8). Each one
+  is a Gram eigendecomposition or SVD; a randomized range finder would cut
+  that further when χ_max is far below the bond's rank. For 2D circuits,
+  routing that also moves qubits apart again (or a 2D tensor network) would
+  reduce the SWAPs.
 - **Fewer cache misses in the stabilizer reference shot.** Its gates are
   cache misses in a 208 MB tableau at d = 101. Storing each row's x and z
   words side by side would halve them. Random measurements (the first and

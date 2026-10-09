@@ -15,7 +15,7 @@ measurements) samples 10,000 shots in 1.5 s, 8× faster than Stim and
 2.8× faster on a single thread (details below). Other circuits too large
 for a state vector run on a matrix product state backend, exact while the
 entanglement is low and approximate, with a fidelity estimate, beyond: it is
-1.4–5× faster than the faster of Qiskit Aer's and quimb's MPS simulators on
+1.6–14× faster than the faster of Qiskit Aer's and quimb's MPS simulators on
 the same circuits.
 
 ## How it works
@@ -109,19 +109,30 @@ circuit applies CZ on all four coupler orientations of an 8×8 grid in turn.
 
 | Circuit | χ cap | qvd | Qiskit Aer 0.17 MPS | quimb 1.15 `CircuitPermMPS` | Fidelity estimate |
 |---|---|---|---|---|---|
-| Random 1D, 64 qubits, depth 10 | 256 | **0.057 s** | 0.25 s | 10.3 s | 1 (exact, χ = 32) |
-| Random 1D, 64 qubits, depth 20 | 256 | **12.3 s** | 114 s | 31.9 s | 1.8×10⁻⁵ |
-| Random 1D, 100 qubits, depth 16 | 128 | **3.6 s** | 18.0 s | 25.5 s | 7.6×10⁻⁷ |
-| Random 8×8 grid, depth 10 | 64 | **5.5 s** | 10.2 s | 18.4 s | 2.4×10⁻¹⁵ |
-| QFT, 100 qubits | 256 | **0.078 s** | 0.11 s | 21.7 s | 1 (χ = 1) |
+| Random 1D, 64 qubits, depth 10 | 256 | **0.018 s** | 0.25 s | 10.3 s | 1 (exact, χ = 32) |
+| Random 1D, 64 qubits, depth 20 | 256 | **8.5 s** | 114 s | 31.9 s | 1.8×10⁻⁵ |
+| Random 1D, 100 qubits, depth 16 | 128 | **1.9 s** | 18.0 s | 25.5 s | 7.6×10⁻⁷ |
+| Random 8×8 grid, depth 10 | 64 | **6.3 s** | 10.2 s | 18.4 s | 10⁻¹⁶ |
+| QFT, 100 qubits | 256 | **0.040 s** | 0.11 s | 21.7 s | 1 (χ = 1) |
+| Random 1D, 64 qubits, depth 12, labels scrambled | 64 | **0.049 s** | 21.3 s | 26.6 s | 1 (qvd), 2×10⁻¹³ (quimb) |
 
 qvd's fidelity estimates agree with quimb's to four digits on the 1D
 circuits. Low numbers are the circuits' entanglement exceeding χ, not
 numerical trouble: on a 4×5 grid small enough to check against the exact
 state, the estimate tracks the true overlap within a factor of two.
 quimb's time is mostly sampling, which it does shot by shot in Python.
-These runs shared the machine with a busy virtual machine, for all three
-alike.
+On the last row the circuit's qubit labels are permuted at random, as for a
+circuit written for other hardware. qvd places the qubits on the chain by
+their interactions first, so the circuit stays exact at χ = 64; the others
+route every gate as long-range. The runs shared the machine with a busy
+virtual machine (qvd's column was measured last, under the heavier load).
+
+The MPS is SVD-bound. Gates that cannot truncate run in parallel layers.
+Gates that may truncate run one at a time, so that every truncation sees
+the exact state; truncating a whole layer at once lost up to 3000× in
+fidelity. Capped bonds use a Gram-matrix eigendecomposition, about twice as
+fast as an SVD. Details are in
+[docs/DESIGN.md](docs/DESIGN.md#8-matrix-product-state-backend-mps).
 
 ## How many qubits?
 

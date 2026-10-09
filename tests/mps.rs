@@ -222,3 +222,42 @@ fn reset_returns_qubits_to_zero() {
     let norm: f64 = state.iter().map(|a| a.norm_sqr()).sum();
     assert!((norm - 1.0).abs() < 1e-12);
 }
+
+#[test]
+fn qubit_order_follows_the_circuit_not_the_labels() {
+    // A 1D brick circuit with its qubits relabelled at random: in label
+    // order every gate is long-range, but the chosen site order recovers
+    // the chain, so χ = 16 stays exact.
+    let n = 24;
+    let chain = random_circuit(n, 8, 5);
+    let labels = common::random_qubits(&mut common::rng(9), n, n);
+    let mut circuit = Circuit::new(n);
+    for instruction in &chain.instructions {
+        if let qvd::Instruction::Gate { gate, qubits } = instruction {
+            let mapped: Vec<usize> = qubits.iter().map(|&q| labels[q]).collect();
+            circuit.gate(gate.clone(), &mapped);
+        }
+    }
+    let mps = mps::simulate(
+        &circuit,
+        Truncation {
+            max_bond: 16,
+            threshold: 1e-16,
+        },
+    );
+    assert_eq!(mps.fidelity(), 1.0);
+    assert!(mps.max_bond_seen() <= 16);
+    let small = {
+        // Check amplitudes on a few basis states against the chain's.
+        let reference = mps::simulate(&chain, Truncation::exact());
+        let mut rng = common::rng(2);
+        (0..20).all(|_| {
+            let bits: Vec<bool> = (0..n).map(|_| rng.random_bool(0.5)).collect();
+            let relabelled: Vec<bool> = (0..n)
+                .map(|q| bits[labels.iter().position(|&l| l == q).unwrap()])
+                .collect();
+            (mps.amplitude(&relabelled) - reference.amplitude(&bits)).norm() < 1e-10
+        })
+    };
+    assert!(small, "amplitudes differ from the unscrambled circuit");
+}

@@ -1,11 +1,12 @@
 //! Time the MPS backend.
 //!
-//!     cargo run --release --example mps -- <random|grid|qft|ghz> <qubits | ROWSxCOLS> <depth> <max bond> [shots] [--qasm FILE]
+//!     cargo run --release --example mps -- <random|grid|qft|ghz> <qubits | ROWSxCOLS> <depth> <max bond> [shots] [--scramble] [--qasm FILE]
 //!
 //! `random` is a 1D brick circuit, `grid` a 2D Google-style circuit (qubits
 //! `ROWSxCOLS`). Prints the time to apply the gates and to sample, the
 //! largest bond dimension and the fidelity estimate. `QVD_THREADS=all|pcores|<n>`
-//! picks the thread pool (default: P-cores).
+//! picks the thread pool (default: P-cores). `--scramble` relabels the
+//! qubits at random, as a circuit written for other hardware might be.
 
 use std::time::Instant;
 
@@ -32,6 +33,9 @@ fn main() {
         "ghz" => ghz(size.parse().unwrap()),
         _ => random_circuit(size.parse().unwrap(), depth, 1),
     };
+    if args.iter().any(|s| s == "--scramble") {
+        circuit = scramble(&circuit);
+    }
     circuit.measure_all();
     if let Some(i) = args.iter().position(|s| s == "--qasm") {
         std::fs::write(&args[i + 1], circuit.to_qasm().unwrap()).unwrap();
@@ -63,4 +67,25 @@ fn main() {
         stats.max_bond_dimension.unwrap(),
         stats.fidelity.unwrap(),
     );
+}
+
+/// The same circuit with the qubits relabelled by a fixed random permutation.
+fn scramble(circuit: &qvd::Circuit) -> qvd::Circuit {
+    let n = circuit.num_qubits;
+    let mut labels: Vec<usize> = (0..n).collect();
+    let mut x = 12345u64;
+    for i in (1..n).rev() {
+        x = x
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        labels.swap(i, (x >> 33) as usize % (i + 1));
+    }
+    let mut out = qvd::Circuit::new(n);
+    for instruction in &circuit.instructions {
+        if let qvd::Instruction::Gate { gate, qubits } = instruction {
+            let mapped: Vec<usize> = qubits.iter().map(|&q| labels[q]).collect();
+            out.gate(gate.clone(), &mapped);
+        }
+    }
+    out
 }

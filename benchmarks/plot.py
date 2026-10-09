@@ -149,7 +149,7 @@ def mps():
         times[r["simulator"]][case] = float(r["seconds"])
     simulators = ["qvd", "qiskit-aer", "quimb"]
     width = 0.27
-    fig, ax = plt.subplots(figsize=(10, 4.2))
+    fig, ax = plt.subplots(figsize=(11.5, 4.4))
     for i, sim in enumerate(simulators):
         xs = [c + (i - 1) * width for c in range(len(cases))]
         ys = [times[sim][case] for case in cases]
@@ -159,7 +159,12 @@ def mps():
     ax.set_yscale("log")
     ax.set_ylabel("seconds, gates + 1000 shots (log scale)")
     ax.set_xticks(range(len(cases)))
-    names = {"random-1d": "Random 1D", "random-grid-8x8": "Random 8x8 grid", "qft": "QFT"}
+    names = {
+        "random-1d": "Random 1D",
+        "random-1d-scrambled": "Random 1D,\nscrambled labels",
+        "random-grid-8x8": "Random 8x8 grid",
+        "qft": "QFT",
+    }
     ax.set_xticklabels(
         [f"{names[c]}\n{q} qubits" + (f", depth {d}" if d else "") + f"\nχ ≤ {b}" for c, q, d, b in cases],
         fontsize=9,

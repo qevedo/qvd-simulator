@@ -11,9 +11,14 @@
 //! discards exactly the smallest Schmidt coefficients, and the product of
 //! kept weights estimates the fidelity.
 //!
+//! The qubits are placed on sites in the order that best keeps interacting
+//! qubits close (see [`qubit_order`]), which matters when the circuit's
+//! labels do not follow its geometry.
+//!
 //! Costs: memory `O(n χ²)`, `O(χ³)` per multi-qubit gate (plus one SWAP per
 //! site of distance between its qubits), `O(n χ²)` per sampled shot.
 
+mod layout;
 mod state;
 
 use std::time::Instant;
@@ -23,8 +28,10 @@ use rand_pcg::Pcg64;
 use rayon::prelude::*;
 
 use crate::circuit::{Circuit, Instruction};
+use crate::matrix::Matrix;
 use crate::simulator::{Options, RunResult, bitstring, counts_from_keys, terminal_measurements};
 
+pub use layout::{cut_cost, qubit_order};
 pub use state::{Mps, Truncation};
 
 /// Shots per independently seeded batch: results depend on the seed only,
@@ -33,15 +40,30 @@ const SHOT_BATCH: usize = 256;
 
 /// Apply the gates of `circuit` (measurements and resets are not allowed).
 pub fn simulate(circuit: &Circuit, truncation: Truncation) -> Mps {
-    let mut mps = Mps::new(circuit.num_qubits, truncation);
-    for instruction in &circuit.instructions {
-        match instruction {
-            Instruction::Gate { gate, qubits } => mps.apply(&gate.matrix(), qubits),
-            Instruction::Barrier { .. } => {}
-            other => panic!("simulate covers unitary circuits only, found {other:?}"),
-        }
+    let mut mps = Mps::with_order(&qubit_order(circuit), truncation);
+    if let Some(other) = circuit
+        .instructions
+        .iter()
+        .find(|i| matches!(i, Instruction::Measure { .. } | Instruction::Reset { .. }))
+    {
+        panic!("simulate covers unitary circuits only, found {other:?}");
     }
+    apply_gates(&mut mps, &circuit.instructions);
     mps
+}
+
+/// Apply the gates among `instructions` as one batch, so that gates on
+/// disjoint qubits run in parallel.
+fn apply_gates(mps: &mut Mps, instructions: &[Instruction]) {
+    let matrices: Vec<(Matrix, &[usize])> = instructions
+        .iter()
+        .filter_map(|i| match i {
+            Instruction::Gate { gate, qubits } => Some((gate.matrix(), qubits.as_slice())),
+            _ => None,
+        })
+        .collect();
+    let gates: Vec<(&Matrix, &[usize])> = matrices.iter().map(|(m, q)| (m, *q)).collect();
+    mps.apply_gates(&gates);
 }
 
 /// Run `circuit` for `shots` shots on an MPS with the truncation in
@@ -69,12 +91,8 @@ pub fn run(circuit: &Circuit, shots: usize, options: &Options) -> RunResult {
             .position(|i| matches!(i, Instruction::Measure { .. } | Instruction::Reset { .. }))
             .unwrap_or(instructions.len()),
     };
-    let mut mps = Mps::new(circuit.num_qubits, truncation);
-    for instruction in &instructions[..first] {
-        if let Instruction::Gate { gate, qubits } = instruction {
-            mps.apply(&gate.matrix(), qubits);
-        }
-    }
+    let mut mps = Mps::with_order(&qubit_order(circuit), truncation);
+    apply_gates(&mut mps, &instructions[..first]);
     result.stats.gate_seconds = start.elapsed().as_secs_f64();
     let start = Instant::now();
     let seeds: Vec<u64> = (0..shots.div_ceil(SHOT_BATCH))
@@ -126,18 +144,21 @@ pub fn run(circuit: &Circuit, shots: usize, options: &Options) -> RunResult {
                         .map(move |_| {
                             let mut mps = base.clone();
                             let mut clbits = vec![false; num_clbits];
-                            for instruction in tail {
-                                match instruction {
-                                    Instruction::Gate { gate, qubits } => {
-                                        mps.apply(&gate.matrix(), qubits)
-                                    }
-                                    Instruction::Measure { qubit, clbit } => {
-                                        clbits[*clbit] = mps.measure(*qubit, &mut rng)
-                                    }
-                                    Instruction::Reset { qubit } => mps.reset(*qubit, &mut rng),
-                                    Instruction::Barrier { .. } => {}
+                            let mut gates_from = 0;
+                            for (i, instruction) in tail.iter().enumerate() {
+                                let (qubit, clbit) = match instruction {
+                                    Instruction::Measure { qubit, clbit } => (*qubit, Some(*clbit)),
+                                    Instruction::Reset { qubit } => (*qubit, None),
+                                    _ => continue,
+                                };
+                                apply_gates(&mut mps, &tail[gates_from..i]);
+                                gates_from = i + 1;
+                                match clbit {
+                                    Some(c) => clbits[c] = mps.measure(qubit, &mut rng),
+                                    None => mps.reset(qubit, &mut rng),
                                 }
                             }
+                            apply_gates(&mut mps, &tail[gates_from..]);
                             (clbits, mps.fidelity(), mps.max_bond_seen())
                         })
                         .collect::<Vec<_>>()
